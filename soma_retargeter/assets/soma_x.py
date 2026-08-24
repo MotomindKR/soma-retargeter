@@ -19,6 +19,9 @@ _EXPECTED_SMPLX_POSE_WIDTH = 165
 # HeadEnd-to-toe stature of the uniform SOMA rig shipped with this retargeter.
 # Identity-backed SOMA-X rigs are normalized to this scale before retargeting.
 REFERENCE_SOMA_STATURE_METERS = 1.7668
+_CANONICAL_SOMA_POSE = (
+    Path(__file__).resolve().parents[1] / "configs" / "soma" / "soma_zero_frame0.bvh"
+)
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,67 @@ def _global_matrices_to_local_transforms(
     return local_transforms
 
 
+def _apply_global_frame_corrections(
+    global_matrices: np.ndarray,
+    source_bind_rotations: np.ndarray,
+    canonical_bind_rotations: np.ndarray,
+) -> np.ndarray:
+    """Align joint bases while preserving every world-space joint position."""
+
+    global_matrices = np.asarray(global_matrices)
+    source_bind_rotations = np.asarray(source_bind_rotations)
+    canonical_bind_rotations = np.asarray(canonical_bind_rotations)
+    if global_matrices.ndim != 4 or global_matrices.shape[2:] != (4, 4):
+        raise ValueError(
+            "global_matrices must have shape (frames, joints, 4, 4); "
+            f"received {global_matrices.shape}"
+        )
+    joint_count = global_matrices.shape[1]
+    expected_rotation_shape = (joint_count, 3, 3)
+    if source_bind_rotations.shape != expected_rotation_shape:
+        raise ValueError(
+            "source bind rotations must have shape "
+            f"{expected_rotation_shape}; received {source_bind_rotations.shape}"
+        )
+    if canonical_bind_rotations.shape != expected_rotation_shape:
+        raise ValueError(
+            "canonical bind rotations must have shape "
+            f"{expected_rotation_shape}; received {canonical_bind_rotations.shape}"
+        )
+
+    corrections = (
+        np.swapaxes(source_bind_rotations, -1, -2) @ canonical_bind_rotations
+    )
+    aligned = np.array(global_matrices, copy=True)
+    aligned[:, :, :3, :3] = global_matrices[:, :, :3, :3] @ corrections[None]
+    return aligned
+
+
+def _canonical_soma_global_rotations(joint_names: list[str]) -> np.ndarray:
+    """Return the repository's canonical Z-up global frame for each SOMA joint."""
+
+    from soma_retargeter.assets.bvh import load_bvh
+
+    skeleton, animation = load_bvh(_CANONICAL_SOMA_POSE)
+    missing = [name for name in joint_names if skeleton.joint_index(name) < 0]
+    if missing:
+        raise ValueError(f"Canonical SOMA pose is missing joints: {missing}")
+
+    local = Rotation.from_quat(animation.local_transforms[0, :, 3:7])
+    global_rotations: list[Rotation] = []
+    source_to_z_up = Rotation.from_euler("x", 90.0, degrees=True)
+    for joint_index, parent_index in enumerate(skeleton.parent_indices):
+        if parent_index == -1:
+            global_rotations.append(source_to_z_up * local[joint_index])
+        else:
+            global_rotations.append(
+                global_rotations[parent_index] * local[joint_index]
+            )
+    return np.stack(
+        [global_rotations[skeleton.joint_index(name)].as_matrix() for name in joint_names]
+    )
+
+
 class SOMAXAMASSConverter:
     """Convert AMASS SMPL-X motion into a native SOMA animation buffer."""
 
@@ -369,9 +433,15 @@ class SOMAXAMASSConverter:
             del pose_chunk, translation_chunk, source_vertices, result, posed
 
         global_matrices = np.concatenate(transform_chunks, axis=0)
+        joint_names = list(rig.joint_names)
+        source_bind_matrices = rig.bind_transforms_world[0].detach().cpu().numpy()
+        global_matrices = _apply_global_frame_corrections(
+            global_matrices,
+            source_bind_matrices[:, :3, :3],
+            _canonical_soma_global_rotations(joint_names),
+        )
         global_matrices[:, :, :3, 3] *= identity_scale
         errors = np.concatenate(error_chunks, axis=0)
-        joint_names = list(rig.joint_names)
         parent_indices = rig.joint_parent_ids.detach().cpu().numpy().astype(np.int32)
         parent_indices[0] = -1
         local_transforms = _global_matrices_to_local_transforms(

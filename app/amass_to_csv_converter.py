@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 from pathlib import Path
 
@@ -18,7 +19,21 @@ from soma_retargeter.assets.soma_x import (
     load_amass_metadata,
     resolve_smplx_model,
 )
+from soma_retargeter.pipelines import utils as pipeline_utils
 from soma_retargeter.pipelines.newton_pipeline import NewtonPipeline
+
+
+def amass_retarget_config() -> dict:
+    """Use Bello's standard tasks without the incompatible BVH warm-start."""
+
+    config = copy.deepcopy(
+        pipeline_utils.get_retargeter_config(
+            pipeline_utils.SourceType.SOMA,
+            pipeline_utils.TargetType.BELLO,
+        )
+    )
+    config["initialization_pose"] = None
+    return config
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,9 +121,12 @@ def main() -> None:
                 skeleton,
                 source_type="soma",
                 robot_type="bello",
+                retarget_config=amass_retarget_config(),
                 robot_model_path=str(robot_model_path) if robot_model_path else None,
             )
-            pipeline.add_input_motions([animation], [wp.transform_identity()], True)
+            pipeline.add_input_motions(
+                [animation], [wp.transform_identity()], True
+            )
             outputs = pipeline.execute()
             if len(outputs) != 1:
                 raise RuntimeError(

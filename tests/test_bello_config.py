@@ -44,6 +44,7 @@ class BelloConfigTests(unittest.TestCase):
         scaler = json.loads(
             (CONFIG_ROOT / "soma_to_bello_scaler_config.json").read_text()
         )
+        self.assertEqual(scaler["joint_scales"]["Hips"], 0.87)
         self.assertEqual(scaler["joint_scales"]["LeftFoot"], 0.82)
         self.assertEqual(scaler["joint_scales"]["RightFoot"], 0.82)
 

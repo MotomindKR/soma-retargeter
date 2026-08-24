@@ -12,8 +12,11 @@ axis-weighted objectives, offline passes, velocity caps, or motion-grounding
 passes.
 
 The scaler was initialized from Bello's neutral link geometry and checked in
-the SOMA neutral pose. The single-stage task weights start from the upstream G1
-pattern and were ablated on all ten bundled SOMA BVHs (6,408 source frames).
+the SOMA neutral pose. Its root scale is lowered from the floating MJCF home
+height using a ten-clip support-height sweep; the selected value places the
+median low-stance sole height at the ground plane without a motion-grounding
+pass. The single-stage task weights start from the upstream G1 pattern and were
+ablated on all ten bundled SOMA BVHs (6,408 source frames).
 The selected arm map uses weak upper-arm and hand orientation tasks, while
 forearm orientation is zero-weighted. Bello's elbow frame cannot reproduce the
 full SOMA forearm frame; asking the whole-body solver to match it caused wrong

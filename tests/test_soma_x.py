@@ -5,11 +5,52 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 from soma_retargeter.assets.soma_x import (
+    _apply_global_frame_corrections,
     _load_resampled_motion,
     load_amass_metadata,
 )
+
+
+def test_joint_frame_alignment_preserves_world_positions() -> None:
+    global_matrices = np.tile(np.eye(4), (2, 2, 1, 1))
+    global_matrices[:, :, :3, 3] = (
+        ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)),
+        ((7.0, 8.0, 9.0), (10.0, 11.0, 12.0)),
+    )
+    pose_rotations = Rotation.from_euler(
+        "zx", ((10.0, 5.0), (20.0, -5.0)), degrees=True
+    ).as_matrix()
+    global_matrices[0, :, :3, :3] = pose_rotations
+    global_matrices[1, :, :3, :3] = pose_rotations[::-1]
+    source_bind = np.stack(
+        [
+            Rotation.from_euler("x", angle, degrees=True).as_matrix()
+            for angle in (30.0, -20.0)
+        ]
+    )
+    canonical_bind = np.stack(
+        [
+            Rotation.from_euler("y", angle, degrees=True).as_matrix()
+            for angle in (-10.0, 25.0)
+        ]
+    )
+
+    aligned = _apply_global_frame_corrections(
+        global_matrices, source_bind, canonical_bind
+    )
+
+    np.testing.assert_allclose(
+        aligned[:, :, :3, 3], global_matrices[:, :, :3, 3], atol=0.0
+    )
+    expected = (
+        global_matrices[:, :, :3, :3]
+        @ np.swapaxes(source_bind, -1, -2)[None]
+        @ canonical_bind[None]
+    )
+    np.testing.assert_allclose(aligned[:, :, :3, :3], expected, atol=1.0e-12)
 
 
 def _write_motion(

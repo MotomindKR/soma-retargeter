@@ -3,7 +3,7 @@
   "human_root_name": "Hips",
   "human_height_assumption": 1.66,
   "joint_scales": {
-    "Hips": 0.903518518519,
+    "Hips": 0.87,
     "Chest": 0.478518518519,
     "LeftLeg": 1.308580246914,
     "RightLeg": 1.308580246914,
