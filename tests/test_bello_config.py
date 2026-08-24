@@ -37,7 +37,12 @@ class BelloConfigTests(unittest.TestCase):
             prefix = "l" if side == "Left" else "r"
             self.assertEqual(hand["t_body"], f"{prefix}_end_effector_sphere_link")
             self.assertEqual(hand["t_weight"], 25.0)
-            self.assertEqual(hand["r_weight"], [3.0, 3.0, 3.0])
+            self.assertEqual(hand["r_weight"], 0.0)
+
+            branch_forearm = stages[0]["ik_map"][f"{side}ForeArm"]
+            branch_hand = stages[0]["ik_map"][f"{side}Hand"]
+            self.assertEqual(branch_forearm["t_weight"], 20.0)
+            self.assertEqual(branch_hand["t_weight"], 15.0)
 
             for stage in stages:
                 foot = stage["ik_map"][f"{side}Foot"]
@@ -77,6 +82,7 @@ class BelloConfigTests(unittest.TestCase):
         )
         offline = config["offline_solver"]
         self.assertEqual(config["ik_iterations"], 12)
+        self.assertEqual(config["smooth_joint_filter_weight"], 5.0)
         self.assertEqual(offline["max_joint_velocity"], 7.5)
         self.assertEqual(
             offline["joint_smoothing_kernel"], [0.0625, 0.25, 0.375, 0.25, 0.0625]

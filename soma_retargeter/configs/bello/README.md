@@ -23,19 +23,26 @@ BELLO_MJCF_PATH=/path/to/bello_full_body_viewer.xml \
   uv run python scripts/ablate_bello.py --preset confirmation
 ```
 
-The selected profile uses 12 IK iterations, 25.0 wrist translation weight, 3.0
-per-axis wrist orientation weight, a 7.5 rad/s velocity cap, and three offline
-smoothing passes. A dedicated two-bone leg pass then restores the scaled foot
-targets without changing the whole-body IK branch. On the AMASS squat
+The selected profile uses 12 IK iterations, position-only elbow and hand
+tracking, a smooth-joint objective weight of 5.0, a 7.5 rad/s velocity cap, and
+three offline smoothing passes. The branch-selection stage uses elbow/hand
+position weights of 20.0/15.0; it does not use SOMA limb-frame rotations, which
+are not reliable indicators of Bello's limited arm twist. A dedicated two-bone
+leg pass then restores the scaled foot targets without changing the whole-body
+IK branch. On the AMASS squat
 regression, median sole pitch fell from 13.9/12.2 degrees to 4.6/4.2 degrees,
 matching the SOMA-X targets. On the bundled ten-motion suite it reduced
 worst-case foot position p95 from 0.435 m to 0.247 m, jitter RMS from 1.022 to
 0.984 degrees, and the colliding-frame fraction from 14.33% to 12.45%.
 
-Relative to the pre-tuning profile, the full-suite evaluation
-reduced worst-motion wrist position p95 by 26.5%, wrist orientation p95 by
-68.3%, jitter RMS by 43.1%, maximum collision penetration by 27.4%, and total
-colliding frames by 10.1%. Near-joint-limit samples fell from 9.86% to 8.27%.
+On the native-rate C10 AMASS regression, temporal regularization reduced right
+elbow-pitch limit saturation from 58.9% to 0%; none of the four elbow degrees of
+freedom remained pinned to a hard limit. Across the bundled SOMA suite, the
+configuration reduced worst-case wrist-position p95 by 33.0%, near-limit
+samples by 59.0%, and maximum collision penetration by 27.7%. Jitter increased
+by 4.1% and the aggregate colliding-frame fraction by 13.3%, while the worst
+motion's colliding-frame fraction fell by 2.1%. Wrist orientation is deliberately
+not an objective because Bello cannot reproduce the full SOMA hand frame.
 
 The MJCF home keyframe places the sole boxes about 57 mm above zero. The viewer
 grounds that display pose from the configured sole geometry. Offline motions
