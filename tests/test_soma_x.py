@@ -5,11 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from scipy.spatial.transform import Rotation
 
 from soma_retargeter.assets.soma_x import (
     _load_resampled_motion,
-    _stabilize_anatomical_joint_frames,
     load_amass_metadata,
 )
 
@@ -72,51 +70,3 @@ def test_rejects_non_smplx_motion(tmp_path: Path) -> None:
 def test_accepts_bytes_encoded_metadata(tmp_path: Path) -> None:
     path = _write_motion(tmp_path / "motion.npz", model_type=b"smplx", gender=b"male")
     assert load_amass_metadata(path).gender == "male"
-
-
-def test_anatomical_frames_follow_landmarks_without_changing_positions() -> None:
-    names = ["Hips", "Chest", "LeftArm", "RightArm"]
-    for side in ("Left", "Right"):
-        names.extend(
-            f"{side}{suffix}"
-            for suffix in (
-                "ForeArm",
-                "Hand",
-                "HandMiddle1",
-                "HandIndex1",
-                "HandPinky1",
-            )
-        )
-    positions = {
-        "Hips": [0.0, 0.0, 0.0],
-        "Chest": [0.0, 0.0, 1.0],
-        "LeftArm": [1.0, 0.0, 1.0],
-        "RightArm": [-1.0, 0.0, 1.0],
-    }
-    for side, x in (("Left", 1.0), ("Right", -1.0)):
-        positions.update(
-            {
-                f"{side}ForeArm": [x, 0.0, 0.0],
-                f"{side}Hand": [x, 0.0, -1.0],
-                f"{side}HandMiddle1": [x, 1.0, -1.0],
-                f"{side}HandIndex1": [x + 0.2, 1.0, -1.0],
-                f"{side}HandPinky1": [x - 0.2, 1.0, -1.0],
-            }
-        )
-    canonical = np.repeat(np.eye(4)[None, ...], len(names), axis=0)
-    canonical[:, :3, 3] = np.asarray([positions[name] for name in names])
-    world_rotation = Rotation.from_euler("zy", [35.0, 20.0], degrees=True).as_matrix()
-    poses = np.repeat(canonical[None, ...], 2, axis=0)
-    poses[:, :, :3, 3] = canonical[:, :3, 3] @ world_rotation.T
-
-    stabilized = _stabilize_anatomical_joint_frames(poses, names, names, canonical)
-
-    for side in ("Left", "Right"):
-        for suffix in ("Arm", "Hand"):
-            index = names.index(f"{side}{suffix}")
-            np.testing.assert_allclose(
-                stabilized[:, index, :3, :3],
-                np.broadcast_to(world_rotation, (2, 3, 3)),
-                atol=1.0e-7,
-            )
-    np.testing.assert_array_equal(stabilized[:, :, :3, 3], poses[:, :, :3, 3])

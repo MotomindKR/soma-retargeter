@@ -83,25 +83,6 @@ class BelloConfigTests(unittest.TestCase):
         )
         self.assertEqual(offline["joint_smoothing_passes"], 3)
 
-    def test_amass_profile_stabilizes_hands_and_planted_feet(self):
-        config = json.loads(
-            (CONFIG_ROOT / "soma_to_bello_retargeter_config.json").read_text()
-        )
-        profile = config["amass_profile"]
-        self.assertEqual(profile["hand_orientation_weight"], 0.5)
-        leveling = profile["contact_foot_leveling"]
-        self.assertEqual(
-            leveling["sole_shapes"],
-            {
-                "LeftFoot": "left_ankle_roll_link_collision_box_1",
-                "RightFoot": "right_ankle_roll_link_collision_box_1",
-            },
-        )
-        self.assertGreater(leveling["maximum_height"], 0.0)
-        self.assertIsNone(leveling["maximum_speed"])
-        self.assertGreater(leveling["stabilizer_rotation_weight"], 2.0)
-        self.assertGreater(leveling["post_smoothing_passes"], 0)
-
 
 if __name__ == "__main__":
     unittest.main()

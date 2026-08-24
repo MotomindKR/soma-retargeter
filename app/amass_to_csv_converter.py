@@ -9,7 +9,6 @@ import argparse
 import os
 from pathlib import Path
 
-import numpy as np
 import warp as wp
 
 from soma_retargeter.assets import csv as csv_utils
@@ -19,7 +18,6 @@ from soma_retargeter.assets.soma_x import (
     load_amass_metadata,
     resolve_smplx_model,
 )
-from soma_retargeter.pipelines import utils as pipeline_utils
 from soma_retargeter.pipelines.newton_pipeline import NewtonPipeline
 
 
@@ -54,54 +52,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--stabilize-anatomical-frames",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="resolve ambiguous limb twist from SOMA anatomical landmarks",
-    )
-    parser.add_argument(
-        "--hand-orientation-weight",
-        type=float,
-        default=None,
-        help="override the AMASS profile's wrist orientation weight",
-    )
-    parser.add_argument(
-        "--level-contact-feet",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="level each sole while its SOMA-X foot landmark is planted",
-    )
-    parser.add_argument(
         "--export-gmr-pickle",
         action="store_true",
         help="also write a renderer-compatible Bello pickle",
     )
     parser.add_argument("--device", default="cuda:0")
     return parser.parse_args()
-
-
-def _amass_retargeter_config(
-    *, hand_orientation_weight: float | None, level_contact_feet: bool
-) -> dict:
-    config = pipeline_utils.get_retargeter_config(
-        pipeline_utils.SourceType.SOMA, pipeline_utils.TargetType.BELLO
-    )
-    profile = config.pop("amass_profile")
-    weight = (
-        float(profile["hand_orientation_weight"])
-        if hand_orientation_weight is None
-        else float(hand_orientation_weight)
-    )
-    if not np.isfinite(weight) or weight < 0.0:
-        raise ValueError("AMASS hand orientation weight must be non-negative")
-    final_stage = next(
-        stage for stage in config["ik_stages"] if stage["name"] == "final_tracking"
-    )
-    for side in ("Left", "Right"):
-        final_stage["ik_map"][f"{side}Hand"]["r_weight"] = [weight] * 3
-    if level_contact_feet:
-        config["contact_foot_leveling"] = profile["contact_foot_leveling"]
-    return config
 
 
 def main() -> None:
@@ -113,10 +69,6 @@ def main() -> None:
         robot_model_path = Path(configured_path) if configured_path else None
 
     csv_config = csv_utils.get_csv_config("bello")
-    retargeter_config = _amass_retargeter_config(
-        hand_orientation_weight=args.hand_orientation_weight,
-        level_contact_feet=args.level_contact_feet,
-    )
     converters: dict[str, SOMAXAMASSConverter] = {}
     with wp.ScopedDevice(args.device):
         for motion_path in args.motions:
@@ -138,7 +90,6 @@ def main() -> None:
                 start_seconds=args.start_seconds,
                 duration_seconds=args.max_seconds,
                 normalize_stature=args.normalize_stature,
-                stabilize_anatomical_frames=args.stabilize_anatomical_frames,
             )
             print(
                 "[INFO]: SOMA-X mean/max vertex error: "
@@ -155,7 +106,6 @@ def main() -> None:
                 skeleton,
                 source_type="soma",
                 robot_type="bello",
-                retarget_config=retargeter_config,
                 robot_model_path=str(robot_model_path) if robot_model_path else None,
             )
             pipeline.add_input_motions([animation], [wp.transform_identity()], True)

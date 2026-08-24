@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -221,161 +220,6 @@ def _global_matrices_to_local_transforms(
     return local_transforms
 
 
-@lru_cache(maxsize=1)
-def _canonical_soma_pose() -> tuple[tuple[str, ...], np.ndarray]:
-    """Load the reference pose used to calibrate the BVH retargeter."""
-    from soma_retargeter.assets import bvh as bvh_utils
-    from soma_retargeter.utils import io_utils
-
-    skeleton, animation = bvh_utils.load_bvh(
-        str(io_utils.get_config_file("soma/soma_zero_frame0.bvh"))
-    )
-    global_transforms = np.asarray(animation.compute_global_transforms(0))
-    matrices = np.zeros((len(global_transforms), 4, 4), dtype=np.float64)
-    matrices[:, 3, 3] = 1.0
-    matrices[:, :3, 3] = global_transforms[:, :3]
-    matrices[:, :3, :3] = Rotation.from_quat(global_transforms[:, 3:7]).as_matrix()
-    return tuple(skeleton.joint_names), matrices
-
-
-def _orthogonal_frames(
-    primary: np.ndarray,
-    secondary: np.ndarray,
-    fallback: np.ndarray,
-) -> np.ndarray:
-    """Build stable right-handed frames from two landmark directions."""
-    primary = np.asarray(primary, dtype=np.float64)
-    secondary = np.asarray(secondary, dtype=np.float64)
-    fallback = np.broadcast_to(np.asarray(fallback, dtype=np.float64), primary.shape)
-    primary_norm = np.linalg.norm(primary, axis=-1, keepdims=True)
-    if np.any(primary_norm < 1.0e-8):
-        raise ValueError("Anatomical frame has a degenerate primary direction")
-    x_axis = primary / primary_norm
-
-    y_axis = secondary - np.sum(secondary * x_axis, axis=-1, keepdims=True) * x_axis
-    y_norm = np.linalg.norm(y_axis, axis=-1, keepdims=True)
-    fallback_axis = (
-        fallback - np.sum(fallback * x_axis, axis=-1, keepdims=True) * x_axis
-    )
-    y_axis = np.where(y_norm < 1.0e-8, fallback_axis, y_axis)
-    y_norm = np.linalg.norm(y_axis, axis=-1, keepdims=True)
-    if np.any(y_norm < 1.0e-8):
-        raise ValueError("Anatomical frame has no independent secondary direction")
-    y_axis /= y_norm
-    z_axis = np.cross(x_axis, y_axis)
-    return np.stack((x_axis, y_axis, z_axis), axis=-1)
-
-
-def _stabilize_anatomical_joint_frames(
-    global_matrices: np.ndarray,
-    joint_names: list[str] | tuple[str, ...],
-    canonical_joint_names: list[str] | tuple[str, ...],
-    canonical_global_matrices: np.ndarray,
-) -> np.ndarray:
-    """Resolve arm and hand twist from landmarks instead of inverse-LBS gauge.
-
-    Limb roll is weakly observable from vertices, so an accurate SOMA-X mesh
-    fit can still return large joint-frame twists.  Segment and palm landmarks
-    provide the same physical frames deterministically.  The canonical pose
-    then maps those anatomical frames into the BVH convention expected by the
-    retargeting configuration.
-    """
-    matrices = np.asarray(global_matrices)
-    canonical = np.asarray(canonical_global_matrices)
-    if matrices.ndim != 4 or matrices.shape[-2:] != (4, 4):
-        raise ValueError(
-            "Global joint matrices must have shape (frames, joints, 4, 4); "
-            f"received {matrices.shape}"
-        )
-    if len(joint_names) != matrices.shape[1]:
-        raise ValueError("Joint names do not match the SOMA-X matrix count")
-    if canonical.shape != (len(canonical_joint_names), 4, 4):
-        raise ValueError("Canonical joint matrices do not match their names")
-
-    indices = {name: index for index, name in enumerate(joint_names)}
-    canonical_indices = {
-        name: index for index, name in enumerate(canonical_joint_names)
-    }
-    required = ("Hips", "Chest", "LeftArm", "RightArm")
-    required += tuple(
-        f"{side}{suffix}"
-        for side in ("Left", "Right")
-        for suffix in (
-            "ForeArm",
-            "Hand",
-            "HandMiddle1",
-            "HandIndex1",
-            "HandPinky1",
-        )
-    )
-    missing = [
-        name
-        for name in required
-        if name not in indices or name not in canonical_indices
-    ]
-    if missing:
-        raise ValueError(f"SOMA anatomical frame landmarks are missing: {missing}")
-
-    output = np.array(matrices, copy=True)
-    positions = matrices[:, :, :3, 3]
-    canonical_positions = canonical[:, :3, 3]
-
-    def position(name: str) -> np.ndarray:
-        return positions[:, indices[name]]
-
-    def canonical_position(name: str) -> np.ndarray:
-        return canonical_positions[canonical_indices[name]]
-
-    def apply_frame(
-        name: str,
-        primary: np.ndarray,
-        secondary: np.ndarray,
-        fallback: np.ndarray,
-        canonical_primary: np.ndarray,
-        canonical_secondary: np.ndarray,
-        canonical_fallback: np.ndarray,
-    ) -> None:
-        source_frame = _orthogonal_frames(primary, secondary, fallback)
-        canonical_frame = _orthogonal_frames(
-            canonical_primary, canonical_secondary, canonical_fallback
-        )
-        frame_to_joint = canonical_frame.T @ canonical[canonical_indices[name], :3, :3]
-        output[:, indices[name], :3, :3] = source_frame @ frame_to_joint
-
-    torso_up = position("Chest") - position("Hips")
-    canonical_torso_up = canonical_position("Chest") - canonical_position("Hips")
-    arm_lateral = position("LeftArm") - position("RightArm")
-    canonical_arm_lateral = canonical_position("LeftArm") - canonical_position(
-        "RightArm"
-    )
-    for side in ("Left", "Right"):
-        arm = f"{side}Arm"
-        forearm = f"{side}ForeArm"
-        hand = f"{side}Hand"
-        middle = f"{side}HandMiddle1"
-        index = f"{side}HandIndex1"
-        pinky = f"{side}HandPinky1"
-        apply_frame(
-            arm,
-            position(forearm) - position(arm),
-            arm_lateral,
-            torso_up,
-            canonical_position(forearm) - canonical_position(arm),
-            canonical_arm_lateral,
-            canonical_torso_up,
-        )
-        apply_frame(
-            hand,
-            position(middle) - position(hand),
-            position(index) - position(pinky),
-            position(hand) - position(forearm),
-            canonical_position(middle) - canonical_position(hand),
-            canonical_position(index) - canonical_position(pinky),
-            canonical_position(hand) - canonical_position(forearm),
-        )
-    return output
-
-
 class SOMAXAMASSConverter:
     """Convert AMASS SMPL-X motion into a native SOMA animation buffer."""
 
@@ -464,7 +308,6 @@ class SOMAXAMASSConverter:
         start_seconds: float = 0.0,
         duration_seconds: float | None = None,
         normalize_stature: bool = True,
-        stabilize_anatomical_frames: bool = True,
     ) -> tuple[Skeleton, AnimationBuffer, SOMAXConversionMetrics]:
         metadata, poses, translations, betas, output_fps = _load_resampled_motion(
             Path(motion_path).expanduser(),
@@ -526,17 +369,9 @@ class SOMAXAMASSConverter:
             del pose_chunk, translation_chunk, source_vertices, result, posed
 
         global_matrices = np.concatenate(transform_chunks, axis=0)
-        joint_names = list(rig.joint_names)
-        if stabilize_anatomical_frames:
-            canonical_names, canonical_matrices = _canonical_soma_pose()
-            global_matrices = _stabilize_anatomical_joint_frames(
-                global_matrices,
-                joint_names,
-                canonical_names,
-                canonical_matrices,
-            )
         global_matrices[:, :, :3, 3] *= identity_scale
         errors = np.concatenate(error_chunks, axis=0)
+        joint_names = list(rig.joint_names)
         parent_indices = rig.joint_parent_ids.detach().cpu().numpy().astype(np.int32)
         parent_indices[0] = -1
         local_transforms = _global_matrices_to_local_transforms(
