@@ -3,6 +3,7 @@
   "num_initialization_frames": 10,
   "num_stabilization_frames": 5,
   "human_robot_scaler_config": "bello/soma_to_bello_scaler_config.json",
+  "feet_stabilizer_config": "bello/bello_feet_stabilizer_config.json",
   "model_height": 1.66,
   "ik_iterations": 12,
   "joint_limit_weight": 10.0,

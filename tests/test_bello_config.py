@@ -39,6 +39,10 @@ class BelloConfigTests(unittest.TestCase):
             self.assertEqual(hand["t_weight"], 25.0)
             self.assertEqual(hand["r_weight"], [3.0, 3.0, 3.0])
 
+            for stage in stages:
+                foot = stage["ik_map"][f"{side}Foot"]
+                self.assertEqual(foot["r_weight"], [10.0, 3.0, 10.0])
+
     def test_feet_use_geometry_scale_and_motion_grounding(self):
         scaler = json.loads(
             (CONFIG_ROOT / "soma_to_bello_scaler_config.json").read_text()
@@ -49,6 +53,20 @@ class BelloConfigTests(unittest.TestCase):
         retargeter = json.loads(
             (CONFIG_ROOT / "soma_to_bello_retargeter_config.json").read_text()
         )
+        self.assertEqual(
+            retargeter["feet_stabilizer_config"],
+            "bello/bello_feet_stabilizer_config.json",
+        )
+        stabilizer = json.loads(
+            (CONFIG_ROOT / "bello_feet_stabilizer_config.json").read_text()
+        )
+        self.assertEqual(stabilizer["robot_type"], "bello")
+        self.assertEqual(stabilizer["effectors"]["bello_root"], [30.0, 8.0])
+        for side in ("left", "right"):
+            self.assertEqual(
+                stabilizer["effectors"][f"{side}_ankle_roll_link"],
+                [10.0, 2.0],
+            )
         ground = retargeter["ground_clearance"]
         self.assertTrue(ground["align_motion_to_ground"])
         self.assertEqual(ground["reference_percentile"], 50.0)

@@ -80,7 +80,10 @@ class FeetStabilizer:
 
             wp.copy(self.joint_q, joint_q)
 
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
+        flat_joint_q = self.joint_q.reshape(
+            (self.joint_q.shape[0] * self.joint_q.shape[1],)
+        )
+        newton.eval_fk(self.model, flat_joint_q, self.model.joint_qd, self.state)
 
     def current_state(self):
         """Returns the current joint configuration of the model."""
