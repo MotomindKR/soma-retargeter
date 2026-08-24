@@ -2,25 +2,31 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import newton
-
 import pathlib
+import sys
 import time
-import warp as wp
 
-import soma_retargeter.utils.math_utils as math_utils
+import newton
+import warp as wp
+from tqdm import trange
+
 import soma_retargeter.assets.bvh as bvh_utils
 import soma_retargeter.assets.csv as csv_utils
-import soma_retargeter.utils.io_utils as io_utils
 import soma_retargeter.pipelines.utils as pipeline_utils
-
-from soma_retargeter.renderers.skeleton_renderer import SkeletonRenderer
-from soma_retargeter.renderers.mesh_renderer import SkeletalMeshRenderer
-from soma_retargeter.renderers.coordinate_renderer import CoordinateRenderer
 from soma_retargeter.animation.skeleton import SkeletonInstance
-from soma_retargeter.utils.space_conversion_utils import SpaceConverter, get_facing_direction_type_from_str
-
-from tqdm import trange
+from soma_retargeter.renderers.coordinate_renderer import CoordinateRenderer
+from soma_retargeter.renderers.mesh_renderer import SkeletalMeshRenderer
+from soma_retargeter.renderers.skeleton_renderer import SkeletonRenderer
+from soma_retargeter.robotics.robot_model import (
+    box_shape_support_points,
+    build_robot_builder,
+    minimum_support_height,
+)
+from soma_retargeter.utils import io_utils, math_utils
+from soma_retargeter.utils.space_conversion_utils import (
+    SpaceConverter,
+    get_facing_direction_type_from_str,
+)
 
 _UI_NEWTON_PANEL_WIDTH  = 320
 _UI_NEWTON_PANEL_MARGIN = 10
@@ -32,6 +38,11 @@ class Viewer:
         self.viewer = viewer
         self.viewer.vsync = True
         self.config = config
+        self.robot_type = self.config['retarget_target']
+        self.robot_model_path = self.config.get('robot_model_path')
+        self.robot_csv_config = csv_utils.get_csv_config(self.robot_type)
+        if self.config.get('export_gmr_pickle', False) and self.robot_type != 'bello':
+            raise ValueError("export_gmr_pickle is only supported for the Bello target.")
         self.converter = SpaceConverter(get_facing_direction_type_from_str(self.config['retarget_source_facing_direction']))
 
         if isinstance(self.viewer, newton.viewer.ViewerNull):
@@ -49,7 +60,7 @@ class Viewer:
         self.playback_total_time = 0.0
 
         self.retarget_source_options = ['soma']
-        self.retarget_target_options = ['unitree_g1']
+        self.retarget_target_options = [self.robot_type]
         self.retarget_solver_options = ['Newton']
         self.retarget_solver_idx     = 0
         self.retarget_target_idx     = 0
@@ -60,28 +71,48 @@ class Viewer:
         self.show_skeleton_joint_axes = False
         self.show_gizmos = True
 
-        self.viewer.renderer.set_title("BVH to CSV Converter")
+        self.viewer.renderer.set_title(f"SOMA Retargeter - {self.robot_type}")
         self.viewer.register_ui_callback(lambda ui: self.gui(ui), position="free")
 
-        g1_builder = newton.ModelBuilder()
-        g1_builder.add_mjcf(
-            newton.utils.download_asset("unitree_g1") / "mjcf/g1_29dof_rev_1_0.xml")
+        robot_builder = build_robot_builder(self.robot_type, self.robot_model_path)
         
         self.num_robots = 1
         self.robot_offsets = [wp.transform(wp.vec3(0.0, i - (self.num_robots - 1) / 2.0, 0.0), wp.quat_identity()) for i in range(self.num_robots)]
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         for _ in range(self.num_robots):
-            builder.add_builder(g1_builder, wp.transform_identity())
+            builder.add_builder(robot_builder, wp.transform_identity())
         self.model = builder.finalize()
 
         self.viewer.set_model(self.model)
         self.viewer.set_world_offsets([0, 0, 0])
         self.state = self.model.state()
 
-        self.g1_num_joint_q = self.model.joint_coord_count // self.model.articulation_count
-        self.g1_joint_q_offsets = [int(i * self.g1_num_joint_q) for i in range(self.model.articulation_count)]
-        self.g1_default_joint_q_values = self.model.joint_q.numpy()
+        self.robot_num_joint_q = self.model.joint_coord_count // self.model.articulation_count
+        self.robot_joint_q_offsets = [int(i * self.robot_num_joint_q) for i in range(self.model.articulation_count)]
+        self.robot_default_joint_q_values = self.model.joint_q.numpy()
+        retarget_config = pipeline_utils.get_retargeter_config(
+            pipeline_utils.get_source_type_from_str(self.config['retarget_source']),
+            pipeline_utils.get_target_type_from_str(self.robot_type),
+        )
+        ground_config = retarget_config.get('ground_clearance')
+        if ground_config is not None:
+            supports = box_shape_support_points(
+                robot_builder, ground_config['sole_shapes']
+            )
+            newton.eval_fk(
+                self.model, self.model.joint_q, self.model.joint_qd, self.state
+            )
+            support_height = minimum_support_height(
+                self.state.body_q.numpy(), supports
+            )
+            self.robot_default_joint_q_values[2] += (
+                float(ground_config.get('ground_height', 0.0)) - support_height
+            )
+            wp.copy(
+                self.model.joint_q,
+                wp.array(self.robot_default_joint_q_values, dtype=wp.float32),
+            )
 
         self.coordinate_renderer = CoordinateRenderer()
         self.skeleton = None
@@ -98,7 +129,7 @@ class Viewer:
         self.ui_scene_options(ui)
 
     def load_csv_file(self, path):
-        self.robot_csv_animation_buffers[0] = csv_utils.load_csv(path)
+        self.robot_csv_animation_buffers[0] = csv_utils.load_csv(path, csv_config=self.robot_csv_config)
         self.compute_playback_total_time()
 
     def load_bvh_file(self, path):
@@ -139,7 +170,7 @@ class Viewer:
         for i in range(self.num_robots):
             robot_offset = self.robot_offsets[i]
 
-            joint_q_offset = self.g1_joint_q_offsets[i]
+            joint_q_offset = self.robot_joint_q_offsets[i]
             if self.robot_csv_animation_buffers[i] is not None:
                 buffer = self.robot_csv_animation_buffers[i]
                 # Apply visual offset
@@ -147,18 +178,18 @@ class Viewer:
                 buffer.xform = robot_offset
 
                 data = buffer.sample(self.playback_time)
-                wp.copy(self.model.joint_q, wp.array(data, dtype=wp.float32), joint_q_offset, 0, self.g1_num_joint_q)
+                wp.copy(self.model.joint_q, wp.array(data, dtype=wp.float32), joint_q_offset, 0, self.robot_num_joint_q)
                 buffer.xform = prev_xform
             else:
                 root_tx = wp.mul(
                     robot_offset,
-                    wp.transform(*self.g1_default_joint_q_values[joint_q_offset:(joint_q_offset + 7)]))
+                    wp.transform(*self.robot_default_joint_q_values[joint_q_offset:(joint_q_offset + 7)]))
 
                 wp.copy(
                     self.model.joint_q,
-                    wp.array(self.g1_default_joint_q_values[joint_q_offset:(joint_q_offset + self.g1_num_joint_q)], dtype=wp.float32),
+                    wp.array(self.robot_default_joint_q_values[joint_q_offset:(joint_q_offset + self.robot_num_joint_q)], dtype=wp.float32),
                     joint_q_offset,
-                    0, self.g1_num_joint_q)
+                    0, self.robot_num_joint_q)
                 wp.copy(self.model.joint_q, wp.array(root_tx[0:7], dtype=wp.float32), joint_q_offset, 0, 7)
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state, None)
@@ -211,12 +242,16 @@ class Viewer:
         self.viewer.log_state(self.state)
         self.viewer.end_frame()
 
-    def run(self):
+    def run(self, max_frames=None):
+        rendered_frames = 0
         while self.viewer.is_running():
             with wp.ScopedTimer("step", active=False):
                 self.step()
             with wp.ScopedTimer("render", active=False):
                 self.render()
+            rendered_frames += 1
+            if max_frames is not None and rendered_frames >= max_frames:
+                break
 
         self.viewer.close()
 
@@ -225,11 +260,17 @@ class Viewer:
         retarget_target = self.retarget_target_options[self.retarget_target_idx]
         retarget_solver = self.retarget_solver_options[self.retarget_solver_idx]
         
-        if (retarget_solver == 'Newton'):
-            import soma_retargeter.pipelines.newton_pipeline as newton_pipeline
-            pipeline = newton_pipeline.NewtonPipeline(self.skeleton, retarget_source, retarget_target)
+        if retarget_solver == 'Newton':
+            from soma_retargeter.pipelines import newton_pipeline
+
+            pipeline = newton_pipeline.NewtonPipeline(
+                self.skeleton,
+                retarget_source,
+                retarget_target,
+                robot_model_path=self.robot_model_path,
+            )
         else:
-            raise(ValueError(f"[ERROR]: Unknown retargeter solver [{retarget_solver}"))
+            raise ValueError(f"[ERROR]: Unknown retargeter solver [{retarget_solver}].")
         
         r_offsets = [wp.transform(wp.vec3(0,0,0), wp.quat(*s.xform[3:7])) for s in self.skeleton_instances]
         pipeline.add_input_motions(self.animation_buffers, r_offsets, True)
@@ -241,6 +282,7 @@ class Viewer:
                 buffer.xform = t_offsets[i]
 
         self.robot_csv_animation_buffers[0] = buffers[0]
+        self.compute_playback_total_time()
 
     def ui_scene_options(self, ui):
         import tkinter as tk
@@ -320,7 +362,11 @@ class Viewer:
                     defaultextension=".csv",
                     filetypes=[("CSV files", "*.csv")])
                 if save_path:
-                    csv_utils.save_csv(save_path, self.robot_csv_animation_buffers[0])
+                    csv_utils.save_csv(
+                        save_path,
+                        self.robot_csv_animation_buffers[0],
+                        csv_config=self.robot_csv_config,
+                    )
 
             if self.robot_csv_animation_buffers[0] is None:
                 ui.end_disabled()
@@ -396,23 +442,27 @@ class Viewer:
     def batched_retargeting(self):
         if not os.path.isdir(self.config['import_folder']):
             print(f"[ERROR]: Import folder does not exist {self.config['import_folder']}.")
-            exit(-1)
+            sys.exit(1)
 
         import_path = pathlib.Path(self.config['import_folder'])
         if len(self.config['export_folder']) == 0:
             print("[ERROR]: No export folder specified.")
-            exit(-1)
+            sys.exit(1)
 
         export_path = pathlib.Path(self.config['export_folder'])
         if not export_path.is_dir():
-            print(f"[WARNING]: Export folder does not exist! Creating new folder at {str(export_path)}!")
+            print(
+                f"[WARNING]: Export folder does not exist; creating {export_path!s}."
+            )
             export_path.mkdir(parents=True, exist_ok=True)
 
         batch_size = self.config['batch_size']
+        if not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError(f"batch_size must be a positive integer; got {batch_size!r}.")
         bvh_files = list(import_path.rglob("*.bvh"))
-        if (len(bvh_files) == 0):
-            print(f"[ERROR]: Import folder {str(import_path)}, does not contain any BVH files.")
-            exit(-1)
+        if len(bvh_files) == 0:
+            print(f"[ERROR]: Import folder {import_path!s} contains no BVH files.")
+            sys.exit(1)
 
         # Sort files based on size (largest first)
         bvh_files.sort(key=lambda p: p.stat().st_size, reverse=True)
@@ -428,13 +478,18 @@ class Viewer:
         retarget_source = self.config['retarget_source']
         retarget_solver = self.config['retargeter']
         retarget_target = self.config["retarget_target"]
-        retarget_pipeline = None
-        if (retarget_solver == 'Newton'):
-            import soma_retargeter.pipelines.newton_pipeline as newton_pipeline
-            retarget_pipeline = newton_pipeline.NewtonPipeline(bvh_skeleton, retarget_source, retarget_target)
-        if retarget_pipeline is None:
-            print(f"[ERROR]: Invalid retarget solver selected [{retarget_solver}]. Use 'Newton'.")
-            exit(-1)
+        if retarget_solver != 'Newton':
+            raise ValueError(
+                f"Invalid retarget solver [{retarget_solver}]; expected 'Newton'."
+            )
+        from soma_retargeter.pipelines import newton_pipeline
+
+        retarget_pipeline = newton_pipeline.NewtonPipeline(
+            bvh_skeleton,
+            retarget_source,
+            retarget_target,
+            robot_model_path=self.robot_model_path,
+        )
 
         nb_retargeted_motions = 0
         start_time = time.time()
@@ -447,25 +502,33 @@ class Viewer:
             for file_path in batch:
                 _, animation = bvh_utils.load_bvh(file_path, bvh_skeleton)
                 # All animations should be on the same skeleton
-                assert expected_num_joints == animation.skeleton.num_joints, (
-                    f"[ERROR]: Unexpected number of joints in input motion. Expected {expected_num_joints}, "
-                    f"got {animation.skeleton.num_joints}")
+                if expected_num_joints != animation.skeleton.num_joints:
+                    raise ValueError(
+                        "Unexpected number of joints in input motion: "
+                        f"expected {expected_num_joints}, "
+                        f"got {animation.skeleton.num_joints}."
+                    )
                 
                 animations.append(animation)
-            assert(len(animations) == len(batch))
 
-            if (len(animations) > 0):
+            if animations:
                 print("[INFO]: Retargeting...")
                 retarget_pipeline.clear()
                 retarget_pipeline.add_input_motions(animations, [bvh_tx_converter] * len(animations), True)
                 csv_buffers = retarget_pipeline.execute()
 
-                assert(len(csv_buffers) == len(animations))
+                if len(csv_buffers) != len(animations):
+                    raise RuntimeError(
+                        f"Retargeter returned {len(csv_buffers)} outputs for "
+                        f"{len(animations)} inputs."
+                    )
                 for i in trange(len(csv_buffers), desc="[INFO]: Exporting CSV Files"):
                     csv_buffer = csv_buffers[i]
                     dst_path = export_path / pathlib.Path(batch[i]).relative_to(import_path).with_suffix(".csv")
                     dst_path.parent.mkdir(parents=True, exist_ok=True)
-                    csv_utils.save_csv(dst_path, csv_buffer)
+                    csv_utils.save_csv(dst_path, csv_buffer, csv_config=self.robot_csv_config)
+                    if self.config.get('export_gmr_pickle', False):
+                        csv_utils.save_gmr_pickle(dst_path.with_suffix('.pkl'), csv_buffer)
 
             nb_retargeted_motions += len(batch)
 
@@ -490,13 +553,13 @@ def main():
     viewer, args = newton.examples.init(parser)
     if not pathlib.Path(args.config).exists():
         print(f"[ERROR]: Main config json file not found: {args.config}")
-        exit(1)
+        sys.exit(1)
 
     config = io_utils.load_json(args.config)
     with wp.ScopedDevice(args.device):
         app = Viewer(viewer, config)
         if not isinstance(viewer, newton.viewer.ViewerNull):
-            app.run()
+            app.run(max_frames=args.num_frames if args.test else None)
         else:
             app.batched_retargeting()
 

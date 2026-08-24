@@ -1,0 +1,10 @@
+{
+  "import_folder": "assets/motions/bvh",
+  "export_folder": "assets/motions/bello-export",
+  "batch_size": 16,
+  "retargeter": "Newton",
+  "retarget_source": "soma",
+  "retarget_target": "bello",
+  "retarget_source_facing_direction": "Mujoco",
+  "export_gmr_pickle": false
+}

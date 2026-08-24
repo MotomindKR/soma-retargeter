@@ -3,11 +3,9 @@
 
 import warp as wp
 
-import soma_retargeter.utils.io_utils as io_utils
-import soma_retargeter.utils.pose_utils as pose_utils
-
-from soma_retargeter.animation.skeleton import Skeleton, SkeletonInstance
 from soma_retargeter.animation.animation_buffer import AnimationBuffer
+from soma_retargeter.animation.skeleton import Skeleton, SkeletonInstance
+from soma_retargeter.utils import io_utils, pose_utils
 
 
 class HumanToRobotScaler:
@@ -20,9 +18,9 @@ class HumanToRobotScaler:
         self.skeleton = skeleton
 
         ratio = human_height / config['human_height_assumption']
-        joint_scales = config['joint_scales']
-        for key in joint_scales.keys():
-            joint_scales[key] *= ratio
+        joint_scales = {
+            name: value * ratio for name, value in config['joint_scales'].items()
+        }
 
         joint_offsets = {}
         joint_offset_data = config['joint_offsets']
@@ -32,10 +30,14 @@ class HumanToRobotScaler:
                 wp.vec3(*t_offset),
                 wp.normalize(wp.quat(*q_offset)))
 
-        joint_offsets["LeftToeBase"] = joint_offsets["LeftToe"]
-        joint_offsets["RightToeBase"] = joint_offsets["RightToe"]
+        if "LeftToe" in joint_offsets:
+            joint_offsets.setdefault("LeftToeBase", joint_offsets["LeftToe"])
+        if "RightToe" in joint_offsets:
+            joint_offsets.setdefault("RightToeBase", joint_offsets["RightToe"])
 
-        self.mapped_joints = [name for name in self.skeleton.joint_names if name in joint_scales.keys()]
+        self.mapped_joints = [
+            name for name in self.skeleton.joint_names if name in joint_scales
+        ]
         self.mapped_joint_indices = wp.array([self.skeleton.joint_index(name) for name in self.mapped_joints], dtype=wp.int32)
         self.mapped_joint_scales = wp.array([joint_scales[name] for name in self.mapped_joints], dtype=wp.float32)
         self.mapped_joint_offsets = wp.array([joint_offsets[name] for name in self.mapped_joints], dtype=wp.transform)
@@ -128,7 +130,12 @@ class HumanToRobotScaler:
 
         return wp_effectors.numpy()
 
-    def compute_effectors_from_buffer(self, animation_buffer: AnimationBuffer, scale_animation: bool, xform: wp.transform = wp.transform_identity()):
+    def compute_effectors_from_buffer(
+        self,
+        animation_buffer: AnimationBuffer,
+        scale_animation: bool,
+        xform: wp.transform | None = None,
+    ):
         """
         Compute scaled effectors for all frames in an animation buffer.
 
@@ -150,6 +157,8 @@ class HumanToRobotScaler:
         """
         if animation_buffer.skeleton != self.skeleton:
             raise ValueError("[ERROR]: AnimationBuffer.skeleton is not equal to self.skeleton.")
+        if xform is None:
+            xform = wp.transform_identity()
 
         @wp.kernel
         def batched_compute_global_pose_kernel(
