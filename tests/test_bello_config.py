@@ -41,6 +41,9 @@ class BelloConfigTests(unittest.TestCase):
 
             branch_forearm = stages[0]["ik_map"][f"{side}ForeArm"]
             branch_hand = stages[0]["ik_map"][f"{side}Hand"]
+            branch_arm = stages[0]["ik_map"][f"{side}Arm"]
+            self.assertEqual(branch_arm["r_weight"], 3.0)
+            self.assertEqual(stages[1]["ik_map"][f"{side}Arm"]["r_weight"], 0.0)
             self.assertEqual(branch_forearm["t_weight"], 20.0)
             self.assertEqual(branch_hand["t_weight"], 15.0)
 
