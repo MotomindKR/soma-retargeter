@@ -75,6 +75,13 @@ nix develop
 
 The flake supplies Python 3.12, `uv`, Git LFS, build tools, Tk, and the Linux graphics libraries needed by the viewer. It automatically syncs `.venv` from `uv.lock`, so `uv run` commands work immediately. Run `git lfs pull` once if the motion assets were not cloned.
 
+The optional AMASS shell installs the pinned SOMA-X conversion stack without
+adding its PyTorch dependency to the normal development environment:
+
+```bash
+nix develop .#amass
+```
+
 With `direnv` and `nix-direnv` installed, approve the checked-in `.envrc` once:
 
 ```bash
@@ -156,6 +163,27 @@ small; when enabled, it adds a legacy pickle containing `fps`, `root_pos`,
 motor mixing remains a downstream control concern; the retargeter exports
 logical ankle pitch and roll.
 
+### AMASS SMPL-X input
+
+AMASS support uses the official `py-soma-x==0.2.1` topology and pose inversion
+pipeline to produce the same 78-joint SOMA representation consumed by the
+Newton retargeter. Enter `nix develop .#amass` or run `uv sync --extra amass`,
+then point the converter at the separately licensed SMPL-X body models:
+
+```bash
+export BELLO_MJCF_PATH="$HOME/bello_mujoco/deps/GMR/assets/bello/mjcf/bello_full_body_viewer.xml"
+uv run --extra amass python ./app/amass_to_csv_converter.py \
+  "$HOME/amass/KIT/572/squat03_stageii.npz" \
+  --body-model-dir "$HOME/amass/body_models" \
+  --output-dir ./outputs/amass-bello \
+  --target-fps 30
+```
+
+SOMA-X assets are downloaded to the Hugging Face cache on first use. Pass
+`--soma-assets` to use an existing asset checkout. `--max-seconds` bounds
+validation runs, while `--export-gmr-pickle` writes the optional visualization
+compatibility format in addition to the named Bello CSV.
+
 To reproduce the Bello parameter ablation, install the evaluation extra and run
 the confirmation preset:
 
@@ -172,6 +200,7 @@ BELLO_MJCF_PATH=/path/to/bello_full_body_viewer.xml \
 | File | Description |
 |------|-------------|
 | `bvh_to_csv_converter.py` | Main entry point. Drives both interactive and headless batch retargeting modes. |
+| `amass_to_csv_converter.py` | AMASS SMPL-X to SOMA-X to robot batch conversion. |
 
 ### `soma_retargeter/`
 

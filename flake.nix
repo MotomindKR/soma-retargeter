@@ -31,38 +31,42 @@
             zlib
             stdenv.cc.cc.lib
           ];
+          mkDevelopmentShell =
+            uvExtras:
+            pkgs.mkShell {
+              packages =
+                with pkgs;
+                [
+                  python
+                  uv
+                  git
+                  git-lfs
+                  pkg-config
+                  cmake
+                  ninja
+                ]
+                ++ runtimeLibraries;
+
+              UV_PYTHON_DOWNLOADS = "never";
+              UV_PROJECT_ENVIRONMENT = ".venv";
+              UV_NO_PROGRESS = "1";
+              PYTHONPATH = "${python}/${python.sitePackages}";
+              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
+
+              shellHook = ''
+                export LD_LIBRARY_PATH="/run/opengl-driver/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                if [[ -f pyproject.toml && -f uv.lock ]]; then
+                  uv sync --frozen --python "${python}/bin/python" ${uvExtras}
+                else
+                  echo "SOMA Retargeter shell: enter the repository to sync its uv environment"
+                fi
+                echo "For Bello, export BELLO_MJCF_PATH=/path/to/bello_full_body_viewer.xml"
+              '';
+            };
         in
         {
-          default = pkgs.mkShell {
-            packages =
-              with pkgs;
-              [
-                python
-                uv
-                git
-                git-lfs
-                pkg-config
-                cmake
-                ninja
-              ]
-              ++ runtimeLibraries;
-
-            UV_PYTHON_DOWNLOADS = "never";
-            UV_PROJECT_ENVIRONMENT = ".venv";
-            UV_NO_PROGRESS = "1";
-            PYTHONPATH = "${python}/${python.sitePackages}";
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
-
-            shellHook = ''
-              export LD_LIBRARY_PATH="/run/opengl-driver/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-              if [[ -f pyproject.toml && -f uv.lock ]]; then
-                uv sync --frozen --python "${python}/bin/python"
-              else
-                echo "SOMA Retargeter shell: enter the repository to sync its uv environment"
-              fi
-              echo "For Bello, export BELLO_MJCF_PATH=/path/to/bello_full_body_viewer.xml"
-            '';
-          };
+          default = mkDevelopmentShell "";
+          amass = mkDevelopmentShell "--extra amass";
         }
       );
 

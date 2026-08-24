@@ -23,6 +23,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+amass = [
+    "py-soma-x==0.2.1",
+]
 evaluation = [
     "mujoco>=3.3.0,<4",
 ]
