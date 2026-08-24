@@ -33,6 +33,11 @@ evaluation = [
 [project.scripts]
 soma-render-bello = "soma_retargeter.renderers.robot_video:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0,<10",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["soma_retargeter*"]

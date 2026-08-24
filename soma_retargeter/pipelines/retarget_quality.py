@@ -96,11 +96,10 @@ def task_tracking_metrics(
     targets: list[np.ndarray],
     pipeline,
 ) -> dict:
-    """Measure unweighted final-stage task errors for each source landmark."""
+    """Measure unweighted task errors for each mapped source landmark."""
 
     if len(motions) != len(targets):
         raise ValueError("Motion and target batch sizes do not match.")
-    mapping = pipeline.ik_stage_mappings[-1]
     trajectories = body_trajectories(pipeline.robot_builder, motions)
     per_motion = []
     pooled: dict[str, dict[str, list[np.ndarray]]] = {}
@@ -112,12 +111,12 @@ def task_tracking_metrics(
                 f"Motion {motion_index} has {len(motion)} frames but {len(target)} targets."
             )
         motion_report = {}
-        for landmark_index, landmark_name in enumerate(mapping["mapped_joints"]):
-            position_body, _ = mapping["position_data"][landmark_index]
+        for landmark_index, landmark_name in enumerate(pipeline.mapped_joints):
+            position_body, _ = pipeline.mapped_body_link_pos_data[landmark_index]
             position_errors = np.linalg.norm(
                 body_q[:, position_body, :3] - target[:, landmark_index, :3], axis=1
             )
-            rotation_body, _ = mapping["rotation_data"][landmark_index]
+            rotation_body, _ = pipeline.mapped_body_link_rot_data[landmark_index]
             actual = Rotation.from_quat(body_q[:, rotation_body, 3:7])
             desired = Rotation.from_quat(target[:, landmark_index, 3:7])
             orientation_errors = np.rad2deg((actual * desired.inv()).magnitude())

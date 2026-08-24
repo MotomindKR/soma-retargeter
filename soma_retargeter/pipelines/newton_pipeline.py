@@ -1,31 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import newton
-import numpy as np
 import warp as wp
-from newton import ik
+import numpy as np
+import newton
+import newton.ik as ik
 from tqdm import trange
 
 import soma_retargeter.assets.bvh as bvh_utils
+import soma_retargeter.utils.newton_utils as newton_utils
+import soma_retargeter.utils.io_utils as io_utils
 import soma_retargeter.pipelines.utils as pipeline_utils
-from soma_retargeter.animation.animation_buffer import AnimationBuffer
+from soma_retargeter.pipelines.ik_objectives import IKSmoothJointFilter
 from soma_retargeter.animation.skeleton import Skeleton, SkeletonInstance
-from soma_retargeter.pipelines.feet_stabilizer import FeetStabilizer
-from soma_retargeter.pipelines.ik_objectives import (
-    IKJointReferenceObjective,
-    IKObjectiveRotationAxisWeighted,
-    IKSmoothJointFilter,
-)
-from soma_retargeter.pipelines.joint_limit_clamper import JointLimitClamper
-from soma_retargeter.robotics.csv_animation_buffer import CSVAnimationBuffer
+from soma_retargeter.animation.animation_buffer import AnimationBuffer
 from soma_retargeter.robotics.human_to_robot_scaler import HumanToRobotScaler
-from soma_retargeter.robotics.robot_model import (
-    box_shape_support_points,
-    build_robot_builder,
-    minimum_support_height,
-)
-from soma_retargeter.utils import io_utils, newton_utils
+from soma_retargeter.robotics.csv_animation_buffer import CSVAnimationBuffer
+from soma_retargeter.robotics.robot_model import build_robot_builder
+from soma_retargeter.pipelines.feet_stabilizer import FeetStabilizer
+from soma_retargeter.pipelines.joint_limit_clamper import JointLimitClamper
 
 _DEFAULT_IK_SOLVER_ITERATIONS = 24
 _DEFAULT_JOINT_LIMIT_OBJECTIVE_WEIGHT = 10.0
@@ -48,7 +41,7 @@ class NewtonPipeline:
         skeleton: Skeleton,
         source_type='soma',
         robot_type='unitree_g1',
-        retarget_config: dict | None = None,
+        retarget_config: dict = None,
         robot_model_path: str | None = None,
     ):
         """
@@ -61,15 +54,15 @@ class NewtonPipeline:
             retarget_config: Optional configuration dictionary. If None, a
                 configuration is loaded from disk based on the source/target
                 types.
-
-        Raises:
-            ValueError: If the target robot type is not supported.
+            robot_model_path: Optional path to an external target MJCF.
         """
         self.source_type = pipeline_utils.get_source_type_from_str(source_type)
         self.target_type = pipeline_utils.get_target_type_from_str(robot_type)
         self.input_targets = []
         self.input_sample_rates = []
         self.max_frames = -1
+        self.robot_type = robot_type
+        self.robot_model_path = robot_model_path
 
         if retarget_config is None:
             retargeter_config = pipeline_utils.get_retargeter_config(self.source_type, self.target_type)
@@ -83,85 +76,75 @@ class NewtonPipeline:
         self.enable_self_penetration = False
         self.smooth_joint_filter_coord_masks = None
         self.joint_limit_clamper = None
-        self.robot_type = robot_type
-        self.robot_model_path = robot_model_path or retargeter_config.get('robot_model_path')
+
         self.robot_builder = build_robot_builder(
             robot_type,
-            self.robot_model_path,
-            enable_self_collisions=self.enable_self_penetration,
+            robot_model_path,
+            enable_self_collisions=False,
         )
-
         self.human_robot_scaler = HumanToRobotScaler(
             skeleton,
             retargeter_config['model_height'],
             io_utils.get_config_file(retargeter_config['human_robot_scaler_config']),
         )
+
         self.num_body_count = self.robot_builder.body_count
         self.num_dofs = self.robot_builder.joint_dof_count
         self.ik_model = self._build_model(1)
 
-        ik_stage_configs = retargeter_config.get('ik_stages')
-        if ik_stage_configs is None:
-            ik_stage_configs = [{'name': 'default', 'ik_map': retargeter_config['ik_map']}]
-        if not ik_stage_configs:
-            raise ValueError("Retargeter configuration must define at least one IK stage.")
-        self.ik_stage_configs = ik_stage_configs
-        self.ik_stage_mappings = [
-            self._build_target_mapping(self.human_robot_scaler.skeleton, stage['ik_map'])
-            for stage in self.ik_stage_configs
-        ]
-        self.mapped_joints = self.ik_stage_mappings[0]['mapped_joints']
-        for stage_mapping in self.ik_stage_mappings[1:]:
-            if stage_mapping['mapped_joints'] != self.mapped_joints:
-                raise ValueError("Every IK stage must map the same SOMA joints in the same order.")
+        (
+            self.mapped_joints,
+            self.mapped_joint_indices,
+            self.mapped_body_link_pos_data,
+            self.mapped_body_link_rot_data,
+        ) = self._build_target_mapping(
+            self.ik_model,
+            self.human_robot_scaler.skeleton,
+            retargeter_config,
+        )
 
-        smooth_body_masks = retargeter_config.get('smooth_joint_filter_objective_body_masks')
-        if smooth_body_masks is not None:
+        smooth_joint_filter_objective_body_masks = retargeter_config.get(
+            'smooth_joint_filter_objective_body_masks', None
+        )
+        if smooth_joint_filter_objective_body_masks is not None:
             self.smooth_joint_filter_coord_masks = newton_utils.create_joint_coord_masks(
-                self.ik_model, smooth_body_masks, 0.0)
-
-        effector_names = self.human_robot_scaler.effector_names()
-        self.target_effector_indices = [effector_names.index(name) for name in self.mapped_joints]
-        self.joint_limit_clamper = JointLimitClamper(self.ik_model)
-
-        self.feet_stabilizer = None
-        self.feet_effector_indices = []
-        feet_config = retargeter_config.get('feet_stabilizer_config')
-        if self.post_processing_enabled and feet_config:
-            self.feet_effector_indices = [
-                self.mapped_joints.index("LeftFoot"),
-                self.mapped_joints.index("RightFoot"),
-            ]
-            self.feet_stabilizer = FeetStabilizer(
-                io_utils.get_config_file(feet_config),
-                self.robot_model_path,
+                self.ik_model, smooth_joint_filter_objective_body_masks, 0.0
             )
 
-        offline_config = retargeter_config.get('offline_solver', {})
-        self.passes_per_frame = max(1, int(offline_config.get('passes_per_frame', 1)))
-        self.initial_settle_passes = max(1, int(offline_config.get('initial_settle_passes', 1)))
-        self.max_joint_velocity = offline_config.get('max_joint_velocity')
-        if self.max_joint_velocity is not None and float(self.max_joint_velocity) <= 0.0:
-            raise ValueError("offline_solver.max_joint_velocity must be positive")
-        self.joint_smoothing_kernel = offline_config.get('joint_smoothing_kernel')
-        self.root_orientation_smoothing_kernel = offline_config.get('root_orientation_smoothing_kernel')
-        self.joint_smoothing_passes = max(0, int(offline_config.get('joint_smoothing_passes', 0)))
-        self.planar_relative_yaw_config = retargeter_config.get('planar_relative_yaw_task')
-        self.ground_clearance_config = retargeter_config.get('ground_clearance')
-        self.ground_clearance_solves = self._build_ground_clearance_data()
+        effector_names = self.human_robot_scaler.effector_names()
+        self.target_effector_indices = [
+            effector_names.index(name) for name in self.mapped_joints
+        ]
+        self.feet_effector_indices = [
+            self.mapped_joints.index("LeftFoot"),
+            self.mapped_joints.index("RightFoot"),
+        ]
+
+        self.feet_stabilizer = FeetStabilizer(
+            io_utils.get_config_file(retargeter_config['feet_stabilizer_config']),
+            robot_model_path,
+        )
+        self.joint_limit_clamper = JointLimitClamper(self.ik_model)
 
         self.initialization_pose = None
         self.num_initialization_frames = 0
         self.num_stabilization_frames = 0
-        initialization_pose = retargeter_config.get('initialization_pose')
-        if initialization_pose:
-            init_skel, init_anim = bvh_utils.load_bvh(io_utils.get_config_file(initialization_pose))
-            self.initialization_pose = SkeletonInstance(init_skel, [0, 0, 0], wp.transform_identity())
-            self.initialization_pose.set_local_transforms(init_anim.get_local_transforms(0))
+        if retargeter_config['initialization_pose']:
+            init_skel, init_anim = bvh_utils.load_bvh(
+                io_utils.get_config_file(retargeter_config['initialization_pose'])
+            )
+            self.initialization_pose = SkeletonInstance(
+                init_skel, [0, 0, 0], wp.transform_identity()
+            )
+            self.initialization_pose.set_local_transforms(
+                init_anim.get_local_transforms(0)
+            )
             self.num_initialization_frames = retargeter_config.get(
-                'num_initialization_frames', _DEFAULT_NUM_INITIALIZATION_FRAMES)
+                'num_initialization_frames', _DEFAULT_NUM_INITIALIZATION_FRAMES
+            )
             self.num_stabilization_frames = retargeter_config.get(
-                'num_stabilization_frames', _DEFAULT_NUM_STABILIZATION_FRAMES)
+                'num_stabilization_frames', _DEFAULT_NUM_STABILIZATION_FRAMES
+            )
 
     def clear(self):
         """
@@ -212,6 +195,7 @@ class NewtonPipeline:
         """
         num_envs = len(self.input_targets)
         if num_envs == 0:
+            self.retargeted_motions = []
             return []
 
         # Clamp objective weights to valid values
@@ -233,79 +217,72 @@ class NewtonPipeline:
         model = self._build_model(num_envs)
         state = model.state()
 
-        if self.feet_stabilizer is not None:
+        if self.post_processing_enabled:
             self.feet_stabilizer.setup_num_envs(num_envs)
             env_feet_tx = np.empty((num_envs, len(self.feet_effector_indices), 7), dtype=np.float32)
 
-        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
-        ik_stages = [
-            self._create_ik_stage(
-                num_envs,
-                model,
-                state,
-                mapping,
-                is_final_stage=stage_index == len(self.ik_stage_mappings) - 1,
-            )
-            for stage_index, mapping in enumerate(self.ik_stage_mappings)
-        ]
+        (
+            position_objectives,
+            rotation_objectives,
+            joint_limit_objective,
+            smooth_joint_filter_objective
+        ) = self._create_ik_objectives(num_envs, model, state)
+
+        # Add optional objectives
+        ik_solver_active_objectives = [*position_objectives, *rotation_objectives]
+        if self.joint_limit_weight > 0.0:
+            ik_solver_active_objectives.append(joint_limit_objective)
+        if self.smooth_joint_filter_weight > 0.0:
+            ik_solver_active_objectives.append(smooth_joint_filter_objective)
+
+        ik_solver = ik.IKSolver(
+            model=self.ik_model,
+            n_problems=num_envs,
+            objectives=ik_solver_active_objectives,
+            lambda_initial=0.1,
+            jacobian_mode=ik.IKJacobianType.ANALYTIC)
 
         joint_q = wp.empty(shape=(num_envs, self.ik_model.joint_coord_count))
         wp.copy(joint_q, model.joint_q)
 
-        for stage in ik_stages:
-            stage['solver'].reset()
+        # Solver initialization
+        ik_solver.reset()
 
         graph_capture = None
 
         def single_step():
-            for stage in ik_stages:
-                stage['solver'].step(joint_q, joint_q, iterations=self.ik_iterations)
+            ik_solver.step(joint_q, joint_q, iterations=self.ik_iterations)
 
         if wp.get_device().is_cuda:
             with wp.ScopedCapture() as cap:
                 single_step()
             graph_capture = cap.graph
         else:
-            single_step()
-        wp.copy(joint_q, model.joint_q)
+            ik_solver.step(joint_q, joint_q, iterations=self.ik_iterations)
 
+        #import time
         num_frames_to_remove = self.num_initialization_frames + self.num_stabilization_frames
-        final_smooth_objective = ik_stages[-1]['smooth_objective']
         joint_q_data = [np.full((len(self.input_targets[i]),), None) for i in range(num_envs)]
-        previous_outputs = [None] * num_envs
         for frame in trange(self.max_frames, desc="[INFO] Retargeting Motions"):
-            if final_smooth_objective is not None and num_frames_to_remove > 0 and frame <= num_frames_to_remove:
-                final_smooth_objective.set_weight(
-                    self.smooth_joint_filter_weight * (frame / float(num_frames_to_remove)))
+            if num_frames_to_remove > 0 and frame <= num_frames_to_remove:
+                smooth_joint_filter_objective.set_weight(self.smooth_joint_filter_weight * (frame / float(num_frames_to_remove)))
 
-            active_envs = []
+            #start_time = time.time()
             for env in range(num_envs):
                 if frame > (len(self.input_targets[env])-1):
                     continue
-                active_envs.append(env)
                 frame_targets = self.input_targets[env][frame]
-                for stage in ik_stages:
-                    for objective_index, target in enumerate(frame_targets):
-                        stage['position_objectives'][objective_index].set_target_position(
-                            env, wp.vec3(*target[0:3]))
-                        stage['rotation_objectives'][objective_index].set_target_rotation(
-                            env, wp.quat(*target[3:7]))
-                yaw_objective = ik_stages[-1]['yaw_objective']
-                if yaw_objective is not None:
-                    yaw_objective.set_target(env, self._planar_relative_yaw_target(frame_targets))
+                for i, target in enumerate(frame_targets):
+                    position_objectives[i].set_target_position(env, wp.vec3(*target[0:3]))
+                    rotation_objectives[i].set_target_rotation(env, wp.quat(*target[3:7]))
 
-            solve_passes = (
-                self.initial_settle_passes
-                if frame in (0, num_frames_to_remove)
-                else self.passes_per_frame
-            )
-            for _ in range(solve_passes):
-                if graph_capture is not None:
-                    wp.capture_launch(graph_capture)
-                else:
-                    single_step()
+            if graph_capture is not None:
+                wp.capture_launch(graph_capture)
+            else:
+                single_step()
 
-            if self.feet_stabilizer is not None:
+            data = None
+            if self.post_processing_enabled:
                 self.feet_stabilizer.reset_state(joint_q)
 
                 for env in range(num_envs):
@@ -319,26 +296,18 @@ class NewtonPipeline:
             else:
                 data = self.joint_limit_clamper.apply(joint_q).numpy()
 
-            self._apply_velocity_limits(data, previous_outputs, active_envs)
-            wp.copy(joint_q, wp.array(data, dtype=wp.float32))
-            self._enforce_ground_clearance(data, joint_q, model, state, active_envs)
+            for env in range(num_envs):
+                if frame > (len(self.input_targets[env])-1):
+                    continue
 
-            for env in active_envs:
-                previous_outputs[env] = np.array(data[env], copy=True)
-                joint_q_data[env][frame] = np.array(data[env], copy=True)
+                joint_q_data[env][frame] = data[env]
 
-        smoothed_motions = []
-        for env in range(num_envs):
-            motion = np.stack(joint_q_data[env])
-            motion = self._smooth_trajectory(motion, self.input_sample_rates[env])
-            smoothed_motions.append(motion)
-        self._enforce_ground_clearance_trajectories(
-            smoothed_motions, joint_q, model, state)
+            #end_time = time.time()
+            #print(f"Time taken for frame {frame}: {end_time - start_time} seconds")
+
         return [
-            CSVAnimationBuffer.create_from_raw_data(
-                motion[num_frames_to_remove:], self.input_sample_rates[env])
-            for env, motion in enumerate(smoothed_motions)
-        ]
+            CSVAnimationBuffer.create_from_raw_data(joint_q_data[i][num_frames_to_remove:], self.input_sample_rates[i])
+            for i in range(num_envs)]
 
     def _build_model(self, num_envs: int):
         builder = newton.ModelBuilder()
@@ -350,46 +319,46 @@ class NewtonPipeline:
 
         return model
 
-    def _build_target_mapping(self, skeleton, ik_map):
+    def _build_target_mapping(self, model, skeleton, retargeter_config):
         mapped_joints = []
+        mapped_joint_indices = []
         mapped_body_link_pos_data = []
         mapped_body_link_rot_data = []
         body_names = [newton_utils.get_name_from_label(label) for label in self.robot_builder.body_label]
-        for joint, mapping_data in ik_map.items():
+        for joint, mapping_data in retargeter_config["ik_map"].items():
             mapped_joints.append(joint)
-            skeleton.joint_index(joint)
+            mapped_joint_indices.append(skeleton.joint_index(joint))
             mapped_body_link_pos_data.append((body_names.index(mapping_data['t_body']), mapping_data['t_weight']))
             mapped_body_link_rot_data.append((body_names.index(mapping_data['r_body']), mapping_data['r_weight']))
 
-        return {
-            'mapped_joints': mapped_joints,
-            'position_data': mapped_body_link_pos_data,
-            'rotation_data': mapped_body_link_rot_data,
-        }
+        return (
+            mapped_joints,
+            mapped_joint_indices,
+            mapped_body_link_pos_data,
+            mapped_body_link_rot_data)
 
-    def _create_ik_stage(self, num_envs, model, state, mapping, *, is_final_stage):
+    def _create_ik_objectives(self, num_envs, model, state):
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
 
         # Gather default body position and rotation based on model state to initialize
         # position and rotation objectives
-        position_data = mapping['position_data']
-        rotation_data = mapping['rotation_data']
-        num_body_link_pos = len(position_data)
-        num_body_link_rot = len(rotation_data)
+        num_body_link_pos = len(self.mapped_body_link_pos_data)
+        num_body_link_rot = len(self.mapped_body_link_rot_data)
         pos_targets = np.zeros((num_envs, num_body_link_pos), dtype=wp.vec3)
         rot_targets = np.zeros((num_envs, num_body_link_rot), dtype=wp.quat)
 
         body_q = state.body_q.numpy()
         for env in range(num_envs):
             base = env * self.num_body_count
-            for ee_idx, (link_idx, _) in enumerate(position_data):
+            for ee_idx, (link_idx, _) in enumerate(self.mapped_body_link_pos_data):
                 pos_targets[env, ee_idx] = body_q[base + link_idx][0:3]
 
-            for ee_idx, (link_idx, _) in enumerate(rotation_data):
+            for ee_idx, (link_idx, _) in enumerate(self.mapped_body_link_rot_data):
                 rot_wp = wp.quat(body_q[base + link_idx][3:7])
                 rot_targets[env, ee_idx] = wp.normalize(rot_wp)
 
-        pos_num_ees = len(position_data)
-        rot_num_ees = len(rotation_data)
+        pos_num_ees = len(self.mapped_body_link_pos_data)
+        rot_num_ees = len(self.mapped_body_link_rot_data)
         pos_target_arrays, rot_target_arrays = [], []
         for ee_idx in range(pos_num_ees):
             pos_wp = wp.array(pos_targets[:, ee_idx], dtype=wp.vec3)
@@ -400,7 +369,7 @@ class NewtonPipeline:
             rot_target_arrays.append(rot_wp)
 
         position_objectives = []
-        for i, (link_idx, w) in enumerate(position_data):
+        for i, (link_idx, w) in enumerate(self.mapped_body_link_pos_data):
             objective = ik.IKObjectivePosition(
                 link_index=link_idx,
                 link_offset=wp.vec3(0.0, 0.0, 0.0),
@@ -409,19 +378,12 @@ class NewtonPipeline:
             position_objectives.append(objective)
 
         rotation_objectives = []
-        for i, (link_idx, weight) in enumerate(rotation_data):
-            objective_args = {
-                'link_index': link_idx,
-                'link_offset_rotation': wp.quat_identity(),
-                'target_rotations': rot_target_arrays[i],
-            }
-            if isinstance(weight, list):
-                objective = IKObjectiveRotationAxisWeighted(
-                    axis_weights=weight,
-                    **objective_args,
-                )
-            else:
-                objective = ik.IKObjectiveRotation(weight=weight, **objective_args)
+        for i, (link_idx, w) in enumerate(self.mapped_body_link_rot_data):
+            objective = ik.IKObjectiveRotation(
+                link_index=link_idx,
+                link_offset_rotation=wp.quat_identity(),
+                target_rotations=rot_target_arrays[i],
+                weight=w)
             rotation_objectives.append(objective)
 
         joint_limit_objective = ik.IKObjectiveJointLimit(
@@ -429,213 +391,11 @@ class NewtonPipeline:
             joint_limit_upper=self.ik_model.joint_limit_upper,
             weight=self.joint_limit_weight)
 
-        active_objectives = [*position_objectives, *rotation_objectives]
-        if self.joint_limit_weight > 0.0:
-            active_objectives.append(joint_limit_objective)
+        # Weight is set to desired value once initialization frames have been processed
+        smooth_joint_limiter_objective = IKSmoothJointFilter(
+            joint_limit_lower=self.ik_model.joint_limit_lower,
+            joint_limit_upper=self.ik_model.joint_limit_upper,
+            weight=0.0,
+            coord_masks=self.smooth_joint_filter_coord_masks)
 
-        smooth_objective = None
-        if is_final_stage and self.smooth_joint_filter_weight > 0.0:
-            initial_smooth_weight = (
-                0.0
-                if self.num_initialization_frames + self.num_stabilization_frames > 0
-                else self.smooth_joint_filter_weight
-            )
-            smooth_objective = IKSmoothJointFilter(
-                joint_limit_lower=self.ik_model.joint_limit_lower,
-                joint_limit_upper=self.ik_model.joint_limit_upper,
-                weight=initial_smooth_weight,
-                coord_masks=self.smooth_joint_filter_coord_masks,
-            )
-            active_objectives.append(smooth_objective)
-
-        yaw_objective = None
-        if is_final_stage and self.planar_relative_yaw_config is not None:
-            yaw_objective = self._create_planar_relative_yaw_objective(num_envs)
-            active_objectives.append(yaw_objective)
-
-        solver = ik.IKSolver(
-            model=self.ik_model,
-            n_problems=num_envs,
-            objectives=active_objectives,
-            lambda_initial=0.1,
-            jacobian_mode=ik.IKJacobianType.ANALYTIC,
-        )
-        return {
-            'position_objectives': position_objectives,
-            'rotation_objectives': rotation_objectives,
-            'smooth_objective': smooth_objective,
-            'yaw_objective': yaw_objective,
-            'solver': solver,
-        }
-
-    def _create_planar_relative_yaw_objective(self, num_envs):
-        config = self.planar_relative_yaw_config
-        joint_name = config['robot_joint_name']
-        joint_names = [newton_utils.get_name_from_label(label) for label in self.ik_model.joint_label]
-        try:
-            joint_index = joint_names.index(joint_name)
-        except ValueError:
-            raise ValueError(f"Planar-yaw joint [{joint_name}] is missing from the robot model.") from None
-
-        coord_index = int(self.ik_model.joint_q_start.numpy()[joint_index])
-        dof_index = int(self.ik_model.joint_qd_start.numpy()[joint_index])
-        self.planar_relative_yaw_limits = (
-            float(self.ik_model.joint_limit_lower.numpy()[dof_index]),
-            float(self.ik_model.joint_limit_upper.numpy()[dof_index]),
-        )
-        return IKJointReferenceObjective(
-            coord_index=coord_index,
-            dof_index=dof_index,
-            targets=wp.zeros(num_envs, dtype=wp.float32),
-            weight=float(config['orientation_cost']),
-        )
-
-    def _planar_relative_yaw_target(self, frame_targets):
-        config = self.planar_relative_yaw_config
-        frame_left, frame_right = (
-            self.mapped_joints.index(name) for name in config['human_frame_landmarks'])
-        root_left, root_right = (
-            self.mapped_joints.index(name) for name in config['human_root_landmarks'])
-        frame_axis = frame_targets[frame_right, :2] - frame_targets[frame_left, :2]
-        root_axis = frame_targets[root_right, :2] - frame_targets[root_left, :2]
-        frame_norm = np.linalg.norm(frame_axis)
-        root_norm = np.linalg.norm(root_axis)
-        if frame_norm < 1.0e-8 or root_norm < 1.0e-8:
-            return 0.0
-        frame_axis /= frame_norm
-        root_axis /= root_norm
-        cross_z = root_axis[0] * frame_axis[1] - root_axis[1] * frame_axis[0]
-        angle = np.arctan2(cross_z, np.dot(root_axis, frame_axis))
-        angle *= float(config.get('scale', 1.0))
-        return float(np.clip(angle, *self.planar_relative_yaw_limits))
-
-    def _apply_velocity_limits(self, data, previous_outputs, active_envs):
-        if self.max_joint_velocity is None:
-            return
-        for env in active_envs:
-            previous = previous_outputs[env]
-            if previous is None:
-                continue
-            max_delta = float(self.max_joint_velocity) / float(self.input_sample_rates[env])
-            data[env, 7:] = previous[7:] + np.clip(
-                data[env, 7:] - previous[7:], -max_delta, max_delta)
-
-    def _smooth_trajectory(self, motion, sample_rate):
-        if self.joint_smoothing_passes == 0 or len(motion) < 2:
-            return motion
-        output = np.asarray(motion, dtype=np.float32).copy()
-        joint_kernel = self._validated_smoothing_kernel(self.joint_smoothing_kernel)
-        root_kernel = self._validated_smoothing_kernel(self.root_orientation_smoothing_kernel)
-
-        for _ in range(self.joint_smoothing_passes):
-            if joint_kernel is not None:
-                output[:, 7:] = self._convolve_edge_padded(output[:, 7:], joint_kernel)
-            if root_kernel is not None:
-                output[:, 3:7] = self._smooth_quaternions(output[:, 3:7], root_kernel)
-
-        if self.max_joint_velocity is not None:
-            max_delta = float(self.max_joint_velocity) / float(sample_rate)
-            for frame in range(1, len(output)):
-                output[frame, 7:] = output[frame - 1, 7:] + np.clip(
-                    output[frame, 7:] - output[frame - 1, 7:], -max_delta, max_delta)
-        return output
-
-    @staticmethod
-    def _validated_smoothing_kernel(values):
-        if values is None:
-            return None
-        kernel = np.asarray(values, dtype=np.float64)
-        if kernel.ndim != 1 or len(kernel) % 2 != 1 or len(kernel) == 0:
-            raise ValueError("Smoothing kernels must be non-empty, odd-length vectors.")
-        if not np.all(np.isfinite(kernel)) or np.sum(kernel) <= 0.0:
-            raise ValueError("Smoothing kernels must contain finite values with a positive sum.")
-        return kernel / np.sum(kernel)
-
-    @staticmethod
-    def _convolve_edge_padded(values, kernel):
-        radius = len(kernel) // 2
-        padded = np.pad(values, ((radius, radius), (0, 0)), mode='edge')
-        return np.stack([
-            np.sum(padded[frame:frame + len(kernel)] * kernel[:, None], axis=0)
-            for frame in range(len(values))
-        ])
-
-    @staticmethod
-    def _smooth_quaternions(quaternions, kernel):
-        radius = len(kernel) // 2
-        padded = np.pad(quaternions, ((radius, radius), (0, 0)), mode='edge')
-        result = np.empty_like(quaternions)
-        for frame in range(len(quaternions)):
-            window = padded[frame:frame + len(kernel)].copy()
-            reference = quaternions[frame]
-            window[np.sum(window * reference, axis=1) < 0.0] *= -1.0
-            average = np.sum(window * kernel[:, None], axis=0)
-            norm = np.linalg.norm(average)
-            result[frame] = average / norm if norm > 1.0e-8 else reference
-        return result
-
-    def _build_ground_clearance_data(self):
-        if self.ground_clearance_config is None:
-            return []
-        percentile = float(
-            self.ground_clearance_config.get('reference_percentile', 50.0)
-        )
-        if not np.isfinite(percentile) or not 0.0 <= percentile <= 100.0:
-            raise ValueError("ground_clearance.reference_percentile must be in [0, 100]")
-        return box_shape_support_points(
-            self.robot_builder,
-            self.ground_clearance_config['sole_shapes'],
-        )
-
-    def _enforce_ground_clearance(self, data, joint_q, model, state, active_envs):
-        if not self.ground_clearance_solves or not active_envs:
-            return
-        flat_joint_q = joint_q.reshape((joint_q.shape[0] * joint_q.shape[1],))
-        newton.eval_fk(model, flat_joint_q, model.joint_qd, state)
-        body_q = state.body_q.numpy()
-        ground_height = float(self.ground_clearance_config.get('ground_height', 0.0))
-        for env in active_envs:
-            body_base = env * self.num_body_count
-            minimum_height = minimum_support_height(
-                body_q, self.ground_clearance_solves, body_base
-            )
-            if minimum_height < ground_height:
-                data[env, 2] += ground_height - minimum_height
-        wp.copy(joint_q, wp.array(data, dtype=wp.float32))
-
-    def _enforce_ground_clearance_trajectories(self, motions, joint_q, model, state):
-        if not self.ground_clearance_solves:
-            return
-        work = np.stack([motion[0] for motion in motions])
-        minimum_heights = [np.empty(len(motion), dtype=np.float64) for motion in motions]
-        for frame in range(max(len(motion) for motion in motions)):
-            active_envs = []
-            for env, motion in enumerate(motions):
-                if frame < len(motion):
-                    work[env] = motion[frame]
-                    active_envs.append(env)
-            wp.copy(joint_q, wp.array(work, dtype=wp.float32))
-            flat_joint_q = joint_q.reshape((joint_q.shape[0] * joint_q.shape[1],))
-            newton.eval_fk(model, flat_joint_q, model.joint_qd, state)
-            body_q = state.body_q.numpy()
-            for env in active_envs:
-                body_base = env * self.num_body_count
-                minimum_heights[env][frame] = minimum_support_height(
-                    body_q, self.ground_clearance_solves, body_base
-                )
-
-        ground_height = float(self.ground_clearance_config.get('ground_height', 0.0))
-        align_motion = bool(
-            self.ground_clearance_config.get('align_motion_to_ground', False)
-        )
-        percentile = float(
-            self.ground_clearance_config.get('reference_percentile', 50.0)
-        )
-        for env, motion in enumerate(motions):
-            heights = minimum_heights[env]
-            alignment = 0.0
-            if align_motion:
-                alignment = ground_height - float(np.percentile(heights, percentile))
-            penetration_correction = ground_height - heights
-            corrections = np.maximum(alignment, penetration_correction)
-            motion[:, 2] += corrections.astype(motion.dtype, copy=False)
+        return position_objectives, rotation_objectives, joint_limit_objective, smooth_joint_limiter_objective

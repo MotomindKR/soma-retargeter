@@ -1,65 +1,40 @@
 # Bello configuration and tuning
 
 The external `bello_full_body_viewer.xml` MJCF defines the model contract used
-by the retargeter. The configuration does not depend on GMR's solver or its
-retargeted motions.
+by the retargeter. The robot description and meshes are not redistributed;
+supply an authorized MJCF with `robot_model_path` or `BELLO_MJCF_PATH`.
 
-The robot description and meshes are intentionally not copied into this
-repository. They are proprietary and require separate authorization. Supply an
-authorized MJCF through `robot_model_path` or `BELLO_MJCF_PATH`.
+Bello uses the same vanilla Newton retargeting path as G1: one `ik_map`, one IK
+solve per frame, the standard smooth-joint and joint-limit objectives, followed
+by the standard two-bone foot stabilizer and joint-limit clamp. Bello-specific
+code is limited to model loading and output formatting. There are no staged IK,
+axis-weighted objectives, offline passes, velocity caps, or motion-grounding
+passes.
 
-The scaler was seeded from the SOMA-to-G1 calibration and Bello's neutral link
-frames, then checked in the SOMA neutral pose. In particular, the foot scale is
-the neutral root-to-ankle geometry ratio (0.82), rather than a transferred GMR
-value. The Newton weights and offline
-solver settings were selected independently by ablation over all ten bundled
-SOMA BVHs (6,408 source frames). The evaluator measures source-task tracking,
-joint-limit proximity, joint jitter and MuJoCo self-contact. Run the final
-confirmation grid with:
+The scaler was initialized from Bello's neutral link geometry and checked in
+the SOMA neutral pose. The single-stage task weights start from the upstream G1
+pattern and were ablated on all ten bundled SOMA BVHs (6,408 source frames).
+The selected arm map uses weak upper-arm and hand orientation tasks, while
+forearm orientation is zero-weighted. Bello's elbow frame cannot reproduce the
+full SOMA forearm frame; asking the whole-body solver to match it caused wrong
+IK branches and severe upstream twist.
+
+Against the initial single-stage baseline on the full suite, the selected map
+reduced colliding frames from 36.7% to 5.4%, near-limit samples from 32.6% to
+6.3%, worst foot-position p95 from 0.342 m to 0.069 m, and worst-motion joint
+jitter RMS from 3.28 to 1.75 degrees. These are comparative kinematic metrics,
+not claims of dynamic feasibility.
+
+Reproduce the bounded tuning grid with:
 
 ```bash
 uv sync --extra evaluation
 BELLO_MJCF_PATH=/path/to/bello_full_body_viewer.xml \
-  uv run python scripts/ablate_bello.py --preset confirmation
+  uv run python scripts/ablate_bello.py --preset broad
 ```
 
-The selected profile uses 12 IK iterations, position-only elbow and hand
-tracking, a smooth-joint objective weight of 5.0, a 7.5 rad/s velocity cap, and
-three offline smoothing passes. The branch-selection stage uses elbow/hand
-position weights of 20.0/15.0 and an upper-arm orientation weight of 3.0. The
-weak upper-arm objective disambiguates shoulder and elbow branches while the
-final stage deliberately leaves hand orientation unconstrained; Bello cannot
-reproduce the full SOMA wrist frame without transferring the residual into
-visually incorrect upstream twist. A dedicated two-bone leg pass then restores
-the scaled foot targets without changing the whole-body IK branch. On the AMASS
-squat regression, median sole pitch fell from 13.9/12.2 degrees to 4.6/4.2
-degrees, matching the SOMA-X targets. On the bundled ten-motion suite it reduced
-worst-case foot position p95 from 0.435 m to 0.247 m, jitter RMS from 1.022 to
-0.984 degrees, and the colliding-frame fraction from 14.33% to 12.45%.
-
-On the native-rate C10 AMASS regression, temporal regularization reduced right
-elbow-pitch limit saturation from 58.9% to 0%; none of the four elbow degrees of
-freedom remained pinned to a hard limit. Across the bundled SOMA suite, the
-configuration reduced worst-case wrist-position p95 by 33.0%, near-limit
-samples by 59.0%, and maximum collision penetration by 27.7%. Jitter increased
-by 4.1% and the aggregate colliding-frame fraction by 13.3%, while the worst
-motion's colliding-frame fraction fell by 2.1%. Wrist orientation is deliberately
-not an objective because Bello cannot reproduce the full SOMA hand frame. On
-the full bundled suite, adding the weak branch-selection orientation reduced
-worst-case upper-arm orientation p95 from 178.4 to 78.1 degrees,
-wrist-position p95 from 0.431 to 0.398 m, aggregate self-collision from 16.2%
-to 14.5%, and jitter RMS from 1.035 to 1.017 degrees.
-
-The MJCF home keyframe places the sole boxes about 57 mm above zero. The viewer
-grounds that display pose from the configured sole geometry. Offline motions
-are translated by a single reference ground offset, with per-frame penetration
-clamping, so stance frames touch zero without flattening jump trajectories. On
-the bundled suite, median lowest-sole height is 0 mm for every clip and the
-high-jump clip retains about 0.64 m of clearance.
-
-These are comparative kinematic metrics, not claims of dynamic feasibility.
-Standing pickups still contain substantial self-contact and should be validated
-in the downstream controller before hardware playback.
+Use `--preset confirmation --max-frames 0` to evaluate the final candidates on
+every frame. The default 240-frame cap keeps exploratory runs memory-bounded.
 
 The output contract is a floating root followed by 25 logical hinge positions.
 Ankle pitch and roll remain logical coordinates; differential motor mixing is a

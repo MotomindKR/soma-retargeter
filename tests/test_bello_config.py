@@ -23,35 +23,24 @@ class BelloConfigTests(unittest.TestCase):
                 msg=joint_name,
             )
 
-    def test_two_stages_share_the_soma_mapping_contract(self):
+    def test_single_stage_uses_the_soma_mapping_contract(self):
         config = json.loads(
             (CONFIG_ROOT / "soma_to_bello_retargeter_config.json").read_text()
         )
-        stages = config["ik_stages"]
-        self.assertEqual(
-            [stage["name"] for stage in stages], ["branch_selection", "final_tracking"]
-        )
-        self.assertEqual(tuple(stages[0]["ik_map"]), tuple(stages[1]["ik_map"]))
+        self.assertNotIn("ik_stages", config)
+        self.assertNotIn("offline_solver", config)
+        self.assertNotIn("ground_clearance", config)
+        mapping = config["ik_map"]
         for side in ("Left", "Right"):
-            hand = stages[1]["ik_map"][f"{side}Hand"]
+            hand = mapping[f"{side}Hand"]
             prefix = "l" if side == "Left" else "r"
             self.assertEqual(hand["t_body"], f"{prefix}_end_effector_sphere_link")
-            self.assertEqual(hand["t_weight"], 25.0)
-            self.assertEqual(hand["r_weight"], 0.0)
+            self.assertEqual(hand["t_weight"], 10.0)
+            self.assertEqual(hand["r_weight"], 0.2)
+            self.assertEqual(mapping[f"{side}ForeArm"]["r_weight"], 0.0)
+            self.assertEqual(mapping[f"{side}Foot"]["r_weight"], 2.0)
 
-            branch_forearm = stages[0]["ik_map"][f"{side}ForeArm"]
-            branch_hand = stages[0]["ik_map"][f"{side}Hand"]
-            branch_arm = stages[0]["ik_map"][f"{side}Arm"]
-            self.assertEqual(branch_arm["r_weight"], 3.0)
-            self.assertEqual(stages[1]["ik_map"][f"{side}Arm"]["r_weight"], 0.0)
-            self.assertEqual(branch_forearm["t_weight"], 20.0)
-            self.assertEqual(branch_hand["t_weight"], 15.0)
-
-            for stage in stages:
-                foot = stage["ik_map"][f"{side}Foot"]
-                self.assertEqual(foot["r_weight"], [10.0, 3.0, 10.0])
-
-    def test_feet_use_geometry_scale_and_motion_grounding(self):
+    def test_feet_use_geometry_scale_and_vanilla_stabilizer(self):
         scaler = json.loads(
             (CONFIG_ROOT / "soma_to_bello_scaler_config.json").read_text()
         )
@@ -75,22 +64,19 @@ class BelloConfigTests(unittest.TestCase):
                 stabilizer["effectors"][f"{side}_ankle_roll_link"],
                 [10.0, 2.0],
             )
-        ground = retargeter["ground_clearance"]
-        self.assertTrue(ground["align_motion_to_ground"])
-        self.assertEqual(ground["reference_percentile"], 50.0)
+        self.assertTrue(retargeter["enable_post_processing"])
 
     def test_ablation_selected_solver_values_are_preserved(self):
         config = json.loads(
             (CONFIG_ROOT / "soma_to_bello_retargeter_config.json").read_text()
         )
-        offline = config["offline_solver"]
-        self.assertEqual(config["ik_iterations"], 12)
-        self.assertEqual(config["smooth_joint_filter_weight"], 5.0)
-        self.assertEqual(offline["max_joint_velocity"], 7.5)
+        self.assertEqual(config["ik_iterations"], 24)
+        self.assertEqual(config["joint_limit_weight"], 10.0)
+        self.assertEqual(config["smooth_joint_filter_weight"], 5.5)
         self.assertEqual(
-            offline["joint_smoothing_kernel"], [0.0625, 0.25, 0.375, 0.25, 0.0625]
+            config["smooth_joint_filter_objective_body_masks"]["l_upper_arm_link"],
+            0.3,
         )
-        self.assertEqual(offline["joint_smoothing_passes"], 3)
 
 
 if __name__ == "__main__":
