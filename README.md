@@ -73,7 +73,10 @@ Enter the development shell:
 nix develop
 ```
 
-The flake supplies Python 3.12, `uv`, Git LFS, build tools, Tk, and the Linux graphics libraries needed by the viewer. It automatically syncs `.venv` from `uv.lock`, so `uv run` commands work immediately. Run `git lfs pull` once if the motion assets were not cloned.
+The flake supplies Python 3.12, `uv`, Git LFS, FFmpeg, build tools, Tk, and the
+Linux graphics libraries needed by the viewer. It automatically syncs `.venv`
+from `uv.lock`, so `uv run` commands work immediately. Run `git lfs pull` once
+if the motion assets were not cloned.
 
 The optional AMASS shell installs the pinned SOMA-X conversion stack without
 adding its PyTorch dependency to the normal development environment:
@@ -175,14 +178,17 @@ export BELLO_MJCF_PATH="$HOME/bello_mujoco/deps/GMR/assets/bello/mjcf/bello_full
 uv run --extra amass python ./app/amass_to_csv_converter.py \
   "$HOME/amass/KIT/572/squat03_stageii.npz" \
   --body-model-dir "$HOME/amass/body_models" \
-  --output-dir ./outputs/amass-bello \
-  --target-fps 30
+  --output-dir ./outputs/amass-bello
 ```
 
 SOMA-X assets are downloaded to the Hugging Face cache on first use. Pass
 `--soma-assets` to use an existing asset checkout. `--max-seconds` bounds
 validation runs, while `--export-gmr-pickle` writes the optional visualization
-compatibility format in addition to the named Bello CSV.
+compatibility format in addition to the named Bello CSV. Native AMASS frame
+rates are preserved by default; `--target-fps` is an explicit resampling
+override. Identity-specific SMPL-X proportions are normalized to the uniform
+SOMA rig expected by the retargeting parameters unless
+`--no-normalize-stature` is passed.
 
 To reproduce the Bello parameter ablation, install the evaluation extra and run
 the confirmation preset:

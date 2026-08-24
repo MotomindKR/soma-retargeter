@@ -13,6 +13,7 @@ import warp as wp
 
 from soma_retargeter.assets import csv as csv_utils
 from soma_retargeter.assets.soma_x import (
+    REFERENCE_SOMA_STATURE_METERS,
     SOMAXAMASSConverter,
     load_amass_metadata,
     resolve_smplx_model,
@@ -32,10 +33,24 @@ def parse_args() -> argparse.Namespace:
         help="SOMA-X assets directory; downloaded and cached when omitted",
     )
     parser.add_argument("--robot-model-path", type=Path, default=None)
-    parser.add_argument("--target-fps", type=float, default=30.0)
+    parser.add_argument(
+        "--target-fps",
+        type=float,
+        default=None,
+        help="retargeting rate; preserves each AMASS clip's native rate when omitted",
+    )
     parser.add_argument("--start-seconds", type=float, default=0.0)
     parser.add_argument("--max-seconds", type=float, default=None)
     parser.add_argument("--soma-batch-size", type=int, default=32)
+    parser.add_argument(
+        "--normalize-stature",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "normalize identity-specific SOMA-X rigs to the retargeter's "
+            f"{REFERENCE_SOMA_STATURE_METERS:.4f} m reference rig"
+        ),
+    )
     parser.add_argument(
         "--export-gmr-pickle",
         action="store_true",
@@ -74,11 +89,18 @@ def main() -> None:
                 target_fps=args.target_fps,
                 start_seconds=args.start_seconds,
                 duration_seconds=args.max_seconds,
+                normalize_stature=args.normalize_stature,
             )
             print(
                 "[INFO]: SOMA-X mean/max vertex error: "
                 f"{metrics.mean_vertex_error_meters:.4f}/"
                 f"{metrics.maximum_vertex_error_meters:.4f} m"
+            )
+            print(
+                "[INFO]: Native/output rate and identity scale: "
+                f"{metrics.source_frame_rate:g}/{metrics.output_frame_rate:g} Hz, "
+                f"{metrics.identity_stature_meters:.4f} m x "
+                f"{metrics.applied_identity_scale:.4f}"
             )
             pipeline = NewtonPipeline(
                 skeleton,

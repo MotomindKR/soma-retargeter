@@ -41,6 +41,7 @@
                   uv
                   git
                   git-lfs
+                  ffmpeg-headless
                   pkg-config
                   cmake
                   ninja

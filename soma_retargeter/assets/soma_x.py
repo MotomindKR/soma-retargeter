@@ -16,6 +16,9 @@ from soma_retargeter.animation.animation_buffer import AnimationBuffer
 from soma_retargeter.animation.skeleton import Skeleton
 
 _EXPECTED_SMPLX_POSE_WIDTH = 165
+# HeadEnd-to-toe stature of the uniform SOMA rig shipped with this retargeter.
+# Identity-backed SOMA-X rigs are normalized to this scale before retargeting.
+REFERENCE_SOMA_STATURE_METERS = 1.7668
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,10 @@ class AMASSMetadata:
 class SOMAXConversionMetrics:
     mean_vertex_error_meters: float
     maximum_vertex_error_meters: float
+    identity_stature_meters: float
+    applied_identity_scale: float
+    source_frame_rate: float
+    output_frame_rate: float
 
 
 def _scalar_string(value: np.ndarray, name: str) -> str:
@@ -135,11 +142,12 @@ def _resample_rotvecs(
 def _load_resampled_motion(
     motion_path: Path,
     *,
-    target_fps: float,
+    target_fps: float | None,
     start_seconds: float,
     duration_seconds: float | None,
-) -> tuple[AMASSMetadata, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[AMASSMetadata, np.ndarray, np.ndarray, np.ndarray, float]:
     metadata = load_amass_metadata(motion_path)
+    output_fps = metadata.frame_rate if target_fps is None else target_fps
     with np.load(motion_path, allow_pickle=False) as motion:
         poses = np.asarray(
             motion["poses"][:, :_EXPECTED_SMPLX_POSE_WIDTH], dtype=np.float64
@@ -157,7 +165,7 @@ def _load_resampled_motion(
     target_times = _sample_times(
         metadata.frame_count,
         metadata.frame_rate,
-        target_fps,
+        output_fps,
         start_seconds,
         duration_seconds,
     )
@@ -169,7 +177,25 @@ def _load_resampled_motion(
         ],
         axis=1,
     ).astype(np.float32)
-    return metadata, poses, translations, betas
+    return metadata, poses, translations, betas, float(output_fps)
+
+
+def _identity_stature_meters(rig: Any) -> float:
+    joint_indices = {name: index for index, name in enumerate(rig.joint_names)}
+    required = ("HeadEnd", "LeftToeEnd", "RightToeEnd")
+    missing = [name for name in required if name not in joint_indices]
+    if missing:
+        raise ValueError(f"SOMA-X public rig is missing stature joints: {missing}")
+    positions = rig.bind_transforms_world[0, :, :3, 3].detach().cpu().numpy()
+    head = positions[joint_indices["HeadEnd"]]
+    toes = 0.5 * (
+        positions[joint_indices["LeftToeEnd"]] + positions[joint_indices["RightToeEnd"]]
+    )
+    delta = np.abs(head - toes)
+    stature = float(np.max(delta))
+    if not np.isfinite(stature) or stature <= 0.0:
+        raise ValueError(f"Invalid SOMA-X identity stature [{stature}]")
+    return stature
 
 
 def _global_matrices_to_local_transforms(
@@ -278,11 +304,12 @@ class SOMAXAMASSConverter:
         self,
         motion_path: str | Path,
         *,
-        target_fps: float = 30.0,
+        target_fps: float | None = None,
         start_seconds: float = 0.0,
         duration_seconds: float | None = None,
+        normalize_stature: bool = True,
     ) -> tuple[Skeleton, AnimationBuffer, SOMAXConversionMetrics]:
-        metadata, poses, translations, betas = _load_resampled_motion(
+        metadata, poses, translations, betas, output_fps = _load_resampled_motion(
             Path(motion_path).expanduser(),
             target_fps=target_fps,
             start_seconds=start_seconds,
@@ -299,6 +326,13 @@ class SOMAXAMASSConverter:
         identity[:, :beta_count] = torch.from_numpy(betas[:beta_count]).to(self.device)
         self.source_layer.prepare_identity(identity)
         self.inverter.prepare_identity(identity)
+        rig = self.soma_layer.public_rig_view()
+        identity_stature = _identity_stature_meters(rig)
+        identity_scale = (
+            REFERENCE_SOMA_STATURE_METERS / identity_stature
+            if normalize_stature
+            else 1.0
+        )
 
         transform_chunks = []
         error_chunks = []
@@ -335,8 +369,8 @@ class SOMAXAMASSConverter:
             del pose_chunk, translation_chunk, source_vertices, result, posed
 
         global_matrices = np.concatenate(transform_chunks, axis=0)
+        global_matrices[:, :, :3, 3] *= identity_scale
         errors = np.concatenate(error_chunks, axis=0)
-        rig = self.soma_layer.public_rig_view()
         joint_names = list(rig.joint_names)
         parent_indices = rig.joint_parent_ids.detach().cpu().numpy().astype(np.int32)
         parent_indices[0] = -1
@@ -352,11 +386,15 @@ class SOMAXAMASSConverter:
         animation = AnimationBuffer(
             skeleton,
             len(local_transforms),
-            float(target_fps),
+            output_fps,
             local_transforms,
         )
         metrics = SOMAXConversionMetrics(
             mean_vertex_error_meters=float(np.mean(errors)),
             maximum_vertex_error_meters=float(np.max(errors)),
+            identity_stature_meters=identity_stature,
+            applied_identity_scale=identity_scale,
+            source_frame_rate=metadata.frame_rate,
+            output_frame_rate=output_fps,
         )
         return skeleton, animation, metrics

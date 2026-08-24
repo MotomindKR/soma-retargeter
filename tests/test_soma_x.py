@@ -32,7 +32,7 @@ def _write_motion(
 
 def test_load_and_resample_amass_metadata(tmp_path: Path) -> None:
     path = _write_motion(tmp_path / "motion.npz")
-    metadata, poses, translations, betas = _load_resampled_motion(
+    metadata, poses, translations, betas, output_fps = _load_resampled_motion(
         path,
         target_fps=30.0,
         start_seconds=0.05,
@@ -44,7 +44,21 @@ def test_load_and_resample_amass_metadata(tmp_path: Path) -> None:
     assert poses.shape == (2, 55, 3)
     assert translations.shape == (2, 3)
     assert betas.shape == (16,)
+    assert output_fps == 30.0
     assert translations[-1, 0] > translations[0, 0]
+
+
+def test_preserves_native_frame_rate_by_default(tmp_path: Path) -> None:
+    path = _write_motion(tmp_path / "motion.npz")
+    _, poses, _, _, output_fps = _load_resampled_motion(
+        path,
+        target_fps=None,
+        start_seconds=0.0,
+        duration_seconds=None,
+    )
+
+    assert output_fps == 60.0
+    assert len(poses) == 7
 
 
 def test_rejects_non_smplx_motion(tmp_path: Path) -> None:
