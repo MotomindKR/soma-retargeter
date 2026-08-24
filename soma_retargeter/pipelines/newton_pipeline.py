@@ -5,6 +5,7 @@ import newton
 import numpy as np
 import warp as wp
 from newton import ik
+from scipy.spatial.transform import Rotation
 from tqdm import trange
 
 import soma_retargeter.assets.bvh as bvh_utils
@@ -32,6 +33,125 @@ _DEFAULT_JOINT_LIMIT_OBJECTIVE_WEIGHT = 10.0
 _DEFAULT_SMOOTH_JOINT_FILTER_OBJECTIVE_WEIGHT = 5.5
 _DEFAULT_NUM_INITIALIZATION_FRAMES = 10
 _DEFAULT_NUM_STABILIZATION_FRAMES = 5
+
+
+def contact_foot_weights(
+    positions: np.ndarray,
+    sample_rate: float,
+    *,
+    floor_percentile: float,
+    maximum_height: float,
+    maximum_speed: float | None,
+    transition_seconds: float,
+) -> np.ndarray:
+    """Return smoothly blended contact weights for one foot trajectory."""
+    positions = np.asarray(positions)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("Foot positions must have shape (frames, 3)")
+    if len(positions) == 0:
+        raise ValueError("Foot positions must contain at least one frame")
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("Foot positions must be finite")
+    if not np.isfinite(sample_rate) or sample_rate <= 0.0:
+        raise ValueError("Contact leveling sample rate must be positive")
+    if not 0.0 <= floor_percentile <= 100.0:
+        raise ValueError("Contact floor percentile must be in [0, 100]")
+    if maximum_height < 0.0 or transition_seconds < 0.0:
+        raise ValueError("Contact leveling thresholds must be non-negative")
+    if maximum_speed is not None and maximum_speed < 0.0:
+        raise ValueError("Contact leveling thresholds must be non-negative")
+
+    if len(positions) > 1:
+        speeds = np.linalg.norm(
+            np.gradient(positions, 1.0 / sample_rate, axis=0), axis=1
+        )
+    else:
+        speeds = np.zeros(1, dtype=np.float64)
+    floor_height = float(np.percentile(positions[:, 2], floor_percentile))
+    planted = positions[:, 2] <= floor_height + maximum_height
+    if maximum_speed is not None:
+        planted &= speeds <= maximum_speed
+    weights = planted.astype(np.float64)
+
+    transition_radius = round(transition_seconds * sample_rate)
+    if transition_radius > 0:
+        blend_kernel = np.hanning(2 * transition_radius + 3)[1:-1]
+        blend_kernel /= np.sum(blend_kernel)
+        padded = np.pad(weights, (transition_radius, transition_radius), mode="edge")
+        weights = np.convolve(padded, blend_kernel, mode="valid")
+    return np.clip(weights, 0.0, 1.0)
+
+
+def level_sole_quaternions(
+    link_quaternions: np.ndarray,
+    sole_local_quaternion: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """Flatten sole roll/pitch while preserving link heading and blend weight."""
+    link_quaternions = np.asarray(link_quaternions)
+    weights = np.asarray(weights, dtype=np.float64)
+    if link_quaternions.ndim != 2 or link_quaternions.shape[1] != 4:
+        raise ValueError("Link quaternions must have shape (frames, 4)")
+    if weights.shape != (len(link_quaternions),):
+        raise ValueError("Sole leveling weights must have shape (frames,)")
+    if not np.all(np.isfinite(weights)) or np.any((weights < 0.0) | (weights > 1.0)):
+        raise ValueError("Sole leveling weights must be finite and in [0, 1]")
+
+    link_rotation = Rotation.from_quat(link_quaternions)
+    sole_local = Rotation.from_quat(np.asarray(sole_local_quaternion))
+    sole_rotation = link_rotation * sole_local
+    sole_forward = sole_rotation.apply(np.asarray([0.0, 1.0, 0.0]))
+    horizontal_forward = sole_forward.copy()
+    horizontal_forward[:, 2] = 0.0
+    horizontal_norm = np.linalg.norm(horizontal_forward, axis=1)
+    valid = horizontal_norm > 1.0e-8
+    effective_weights = np.array(weights, copy=True)
+    effective_weights[~valid] = 0.0
+    horizontal_forward[valid] /= horizontal_norm[valid, None]
+    horizontal_forward[~valid] = np.asarray([0.0, 1.0, 0.0])
+    up = np.broadcast_to(np.asarray([0.0, 0.0, 1.0]), horizontal_forward.shape)
+    right = np.cross(horizontal_forward, up)
+    flat_sole = Rotation.from_matrix(np.stack((right, horizontal_forward, up), axis=-1))
+    flat_link = flat_sole * sole_local.inv()
+    correction = flat_link * link_rotation.inv()
+    return (
+        Rotation.from_rotvec(correction.as_rotvec() * effective_weights[:, None])
+        * link_rotation
+    ).as_quat()
+
+
+def level_contact_foot_targets(
+    targets: np.ndarray,
+    sample_rate: float,
+    foot_frames: list[tuple[int, np.ndarray]],
+    *,
+    floor_percentile: float,
+    maximum_height: float,
+    maximum_speed: float | None,
+    transition_seconds: float,
+) -> np.ndarray:
+    """Level robot sole targets only while their source landmarks are planted."""
+    targets = np.asarray(targets)
+    if targets.ndim != 3 or targets.shape[2] != 7:
+        raise ValueError("IK targets must have shape (frames, effectors, 7)")
+
+    output = np.array(targets, copy=True)
+    for target_index, sole_local_quaternion in foot_frames:
+        if target_index < 0 or target_index >= targets.shape[1]:
+            raise ValueError(f"Contact foot target index is invalid: {target_index}")
+        weights = contact_foot_weights(
+            targets[:, target_index, :3],
+            sample_rate,
+            floor_percentile=floor_percentile,
+            maximum_height=maximum_height,
+            maximum_speed=maximum_speed,
+            transition_seconds=transition_seconds,
+        )
+        if np.any(weights > 1.0e-8):
+            output[:, target_index, 3:7] = level_sole_quaternions(
+                targets[:, target_index, 3:7], sole_local_quaternion, weights
+            )
+    return output
 
 
 class NewtonPipeline:
@@ -69,6 +189,7 @@ class NewtonPipeline:
         self.target_type = pipeline_utils.get_target_type_from_str(robot_type)
         self.input_targets = []
         self.input_sample_rates = []
+        self.input_contact_weights = []
         self.max_frames = -1
 
         if retarget_config is None:
@@ -123,8 +244,10 @@ class NewtonPipeline:
         effector_names = self.human_robot_scaler.effector_names()
         self.target_effector_indices = [effector_names.index(name) for name in self.mapped_joints]
         self.joint_limit_clamper = JointLimitClamper(self.ik_model)
+        self.contact_foot_leveling_config = retargeter_config.get('contact_foot_leveling')
 
         self.feet_stabilizer = None
+        self.contact_feet_stabilizer = None
         self.feet_effector_indices = []
         feet_config = retargeter_config.get('feet_stabilizer_config')
         if self.post_processing_enabled and feet_config:
@@ -149,6 +272,18 @@ class NewtonPipeline:
         self.planar_relative_yaw_config = retargeter_config.get('planar_relative_yaw_task')
         self.ground_clearance_config = retargeter_config.get('ground_clearance')
         self.ground_clearance_solves = self._build_ground_clearance_data()
+        self.contact_foot_frames = self._build_contact_foot_frames()
+        if self.feet_stabilizer is not None and self.contact_foot_frames:
+            weight = float(self.contact_foot_leveling_config.get(
+                'stabilizer_rotation_weight', 100.0))
+            self.contact_feet_stabilizer = FeetStabilizer(
+                io_utils.get_config_file(feet_config),
+                self.robot_model_path,
+                effector_rotation_weight_overrides={
+                    'left_ankle_roll_link': weight,
+                    'right_ankle_roll_link': weight,
+                },
+            )
 
         self.initialization_pose = None
         self.num_initialization_frames = 0
@@ -172,6 +307,7 @@ class NewtonPipeline:
         """
         self.input_targets = []
         self.input_sample_rates = []
+        self.input_contact_weights = []
         self.max_frames = -1
 
     def add_input_motions(self, buffers: list[AnimationBuffer], offsets: list[wp.transform], scale_animation: bool):
@@ -190,14 +326,51 @@ class NewtonPipeline:
         offsets = offsets if len(offsets) == len(buffers) else [wp.transform_identity()] * len(buffers)
         for i in trange(len(buffers), desc="[INFO] Converting Motions for Newton"):
             buffer = buffers[i]
+            source_frame_offset = 0
             if self.initialization_pose and self.num_initialization_frames > 0:
                 buffer = newton_utils.create_buffer_with_initialization_frames(
                     self.initialization_pose, buffers[i], self.num_initialization_frames, self.num_stabilization_frames)
+                source_frame_offset = buffer.num_frames - buffers[i].num_frames
 
             self.max_frames = max(self.max_frames, buffer.num_frames)
             buffer_effectors = self.human_robot_scaler.compute_effectors_from_buffer(buffer, scale_animation, offsets[i])
+            buffer_effectors = buffer_effectors[:, self.target_effector_indices, :]
+            if self.contact_foot_frames:
+                contact = self.contact_foot_leveling_config
+                contact_kwargs = {
+                    'floor_percentile': float(contact.get('floor_percentile', 5.0)),
+                    'maximum_height': float(contact.get('maximum_height', 0.06)),
+                    'maximum_speed': (
+                        None if contact.get('maximum_speed') is None
+                        else float(contact['maximum_speed'])
+                    ),
+                    'transition_seconds': float(contact.get('transition_seconds', 0.08)),
+                }
+                weights = np.stack([
+                    contact_foot_weights(
+                        buffer_effectors[source_frame_offset:, target_index, :3],
+                        buffer.sample_rate,
+                        **contact_kwargs,
+                    )
+                    for target_index, _, _ in self.contact_foot_frames
+                ], axis=1)
+                if source_frame_offset:
+                    weights = np.concatenate((
+                        np.broadcast_to(weights[0], (source_frame_offset, weights.shape[1])),
+                        weights,
+                    ))
+                buffer_effectors = np.array(buffer_effectors, copy=True)
+                for foot_index, (target_index, _, sole_quaternion) in enumerate(
+                    self.contact_foot_frames
+                ):
+                    buffer_effectors[:, target_index, 3:7] = level_sole_quaternions(
+                        buffer_effectors[:, target_index, 3:7],
+                        sole_quaternion,
+                        weights[:, foot_index],
+                    )
+                self.input_contact_weights.append(weights)
 
-            self.input_targets.append(buffer_effectors[:, self.target_effector_indices, :])
+            self.input_targets.append(buffer_effectors)
             self.input_sample_rates.append(buffers[i].sample_rate)
 
     def execute(self):
@@ -236,6 +409,8 @@ class NewtonPipeline:
         if self.feet_stabilizer is not None:
             self.feet_stabilizer.setup_num_envs(num_envs)
             env_feet_tx = np.empty((num_envs, len(self.feet_effector_indices), 7), dtype=np.float32)
+        if self.contact_feet_stabilizer is not None:
+            self.contact_feet_stabilizer.setup_num_envs(num_envs)
 
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)
         ik_stages = [
@@ -332,6 +507,7 @@ class NewtonPipeline:
             motion = np.stack(joint_q_data[env])
             motion = self._smooth_trajectory(motion, self.input_sample_rates[env])
             smoothed_motions.append(motion)
+        self._post_stabilize_contact_feet(smoothed_motions, joint_q)
         self._enforce_ground_clearance_trajectories(
             smoothed_motions, joint_q, model, state)
         return [
@@ -586,6 +762,88 @@ class NewtonPipeline:
             self.robot_builder,
             self.ground_clearance_config['sole_shapes'],
         )
+
+    def _build_contact_foot_frames(self):
+        if self.contact_foot_leveling_config is None:
+            return []
+        configured_shapes = self.contact_foot_leveling_config.get('sole_shapes', {})
+        if set(configured_shapes) != {'LeftFoot', 'RightFoot'}:
+            raise ValueError(
+                "contact_foot_leveling.sole_shapes must map LeftFoot and RightFoot"
+            )
+        shape_names = [label.split('/')[-1] for label in self.robot_builder.shape_label]
+        result = []
+        for landmark in ('LeftFoot', 'RightFoot'):
+            shape_name = configured_shapes[landmark]
+            try:
+                shape_index = shape_names.index(shape_name)
+            except ValueError:
+                raise ValueError(
+                    f"Contact sole shape [{shape_name}] is missing from the robot model"
+                ) from None
+            if self.robot_builder.shape_type[shape_index] != newton.GeoType.BOX:
+                raise ValueError(f"Contact sole shape [{shape_name}] must be a box")
+            target_index = self.mapped_joints.index(landmark)
+            shape_transform = np.asarray(
+                self.robot_builder.shape_transform[shape_index], dtype=np.float64
+            )
+            result.append((
+                target_index,
+                int(self.robot_builder.shape_body[shape_index]),
+                shape_transform[3:7],
+            ))
+        return result
+
+    def _post_stabilize_contact_feet(self, motions, joint_q):
+        if self.contact_feet_stabilizer is None:
+            return
+        passes = int(self.contact_foot_leveling_config.get('post_smoothing_passes', 0))
+        if passes < 0:
+            raise ValueError(
+                "contact_foot_leveling.post_smoothing_passes must be non-negative"
+            )
+        if passes == 0:
+            return
+
+        num_envs = len(motions)
+        work = np.stack([motion[0] for motion in motions])
+        foot_targets = np.empty(
+            (num_envs, len(self.feet_effector_indices), 7), dtype=np.float32
+        )
+        for frame in range(max(len(motion) for motion in motions)):
+            active_envs = []
+            for env, motion in enumerate(motions):
+                if frame < len(motion):
+                    work[env] = motion[frame]
+                    active_envs.append(env)
+            wp.copy(joint_q, wp.array(work, dtype=wp.float32))
+            self.contact_feet_stabilizer.reset_state(joint_q)
+            body_q = self.contact_feet_stabilizer.state.body_q.numpy().reshape(
+                num_envs, self.contact_feet_stabilizer.num_body_count, 7
+            )
+            for env in range(num_envs):
+                weight_frame = min(frame, len(self.input_contact_weights[env]) - 1)
+                for foot_index, (_, body_index, sole_quaternion) in enumerate(
+                    self.contact_foot_frames
+                ):
+                    current = body_q[env, body_index]
+                    foot_targets[env, foot_index, :3] = current[:3]
+                    foot_targets[env, foot_index, 3:7] = level_sole_quaternions(
+                        current[None, 3:7],
+                        sole_quaternion,
+                        self.input_contact_weights[env][
+                            weight_frame, foot_index:foot_index + 1
+                        ],
+                    )[0]
+            for _ in range(passes):
+                self.contact_feet_stabilizer.reset_state(joint_q)
+                self.contact_feet_stabilizer.solve(foot_targets)
+                work = self.joint_limit_clamper.apply(
+                    self.contact_feet_stabilizer.current_state()
+                ).numpy()
+                wp.copy(joint_q, wp.array(work, dtype=wp.float32))
+            for env in active_envs:
+                motions[env][frame] = work[env]
 
     def _enforce_ground_clearance(self, data, joint_q, model, state, active_envs):
         if not self.ground_clearance_solves or not active_envs:

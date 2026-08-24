@@ -206,6 +206,13 @@ override. Identity-specific SMPL-X proportions are normalized to the uniform
 SOMA rig expected by the retargeting parameters unless
 `--no-normalize-stature` is passed.
 
+The AMASS profile also reconstructs upper-arm and palm frames from SOMA-X
+anatomical landmarks, removing inverse-pose limb-roll ambiguity before robot
+IK. During detected foot contact it preserves sole heading while leveling sole
+roll/pitch in a bounded robot-space pass; swing-foot orientation is untouched.
+Use `--no-stabilize-anatomical-frames` or `--no-level-contact-feet` for
+ablations, and `--hand-orientation-weight` to override wrist tracking strength.
+
 To reproduce the Bello parameter ablation, install the evaluation extra and run
 the confirmation preset:
 

@@ -9,6 +9,21 @@
   "joint_limit_weight": 10.0,
   "smooth_joint_filter_weight": 0.0,
   "enable_post_processing": true,
+  "amass_profile": {
+    "hand_orientation_weight": 0.5,
+    "contact_foot_leveling": {
+      "sole_shapes": {
+        "LeftFoot": "left_ankle_roll_link_collision_box_1",
+        "RightFoot": "right_ankle_roll_link_collision_box_1"
+      },
+      "floor_percentile": 5.0,
+      "maximum_height": 0.06,
+      "maximum_speed": null,
+      "transition_seconds": 0.08,
+      "stabilizer_rotation_weight": 100.0,
+      "post_smoothing_passes": 2
+    }
+  },
   "offline_solver": {
     "passes_per_frame": 1,
     "initial_settle_passes": 20,

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import math
+
 import newton
 import warp as wp
 
@@ -18,7 +20,12 @@ class FeetStabilizer:
     """
     FeetStabilizer class for managing inverse kinematics and feet stabilization for robotic motion transfer.
     """
-    def __init__(self, config: str, robot_model_path: str | None = None):
+    def __init__(
+        self,
+        config: str,
+        robot_model_path: str | None = None,
+        effector_rotation_weight_overrides: dict[str, float] | None = None,
+    ):
         """
         Initialize the feet stabilizer with the specified configuration.
         Args:
@@ -27,6 +34,15 @@ class FeetStabilizer:
             ValueError: If the robot type specified in the config is unknown.
         """
         self._load_config(config)
+        for name, weight in (effector_rotation_weight_overrides or {}).items():
+            weight = float(weight)
+            if name not in self.effectors:
+                raise ValueError(f"Feet stabilizer effector [{name}] is missing")
+            if not math.isfinite(weight) or weight < 0.0:
+                raise ValueError(
+                    f"Feet stabilizer rotation weight for [{name}] must be non-negative"
+                )
+            self.effectors[name][1] = weight
 
         self.robot_builder = build_robot_builder(self.robot_type, robot_model_path)
         self.num_body_count = self.robot_builder.body_count
