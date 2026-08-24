@@ -150,6 +150,22 @@ uv run python ./app/bvh_to_csv_converter.py \
 
 The viewer starts in Bello's MJCF `home` pose. Use **BVH Motion → Load → Retarget** to display the SOMA source and Bello result together. The timeline supports play/pause, scrubbing, reverse/variable speed, and looping, and the result can be saved as a named Bello CSV from the same panel.
 
+To capture that same Newton `ViewerGL` presentation headlessly, render the
+canonical CSV directly. This preserves the interactive viewer's mesh shading,
+checker floor, contact shadows, and actor-relative side camera; it does not
+translate the motion through another playback engine.
+
+```bash
+export BELLO_MJCF_PATH="$HOME/bello_mujoco/deps/GMR/assets/bello/mjcf/bello_full_body_viewer.xml"
+uv run soma-render-bello \
+  ./outputs/amass-bello/squat03_stageii.csv \
+  ./outputs/amass-bello/squat03_stageii.mp4
+```
+
+The command expects the canonical 120 Hz Bello CSV by default and renders at
+30 fps. Use `--source-fps` for an explicitly resampled CSV, and camera or output
+options from `uv run soma-render-bello --help` when needed.
+
 ### Batch conversion
 
 ```bash

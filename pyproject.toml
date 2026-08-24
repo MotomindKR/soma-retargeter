@@ -30,6 +30,9 @@ evaluation = [
     "mujoco>=3.3.0,<4",
 ]
 
+[project.scripts]
+soma-render-bello = "soma_retargeter.renderers.robot_video:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["soma_retargeter*"]
