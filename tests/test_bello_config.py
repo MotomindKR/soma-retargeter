@@ -31,6 +31,7 @@ class BelloConfigTests(unittest.TestCase):
         self.assertNotIn("offline_solver", config)
         self.assertNotIn("ground_clearance", config)
         mapping = config["ik_map"]
+        self.assertEqual(mapping["Hips"]["r_weight"], 10.0)
         for side in ("Left", "Right"):
             hand = mapping[f"{side}Hand"]
             prefix = "l" if side == "Left" else "r"
@@ -38,6 +39,8 @@ class BelloConfigTests(unittest.TestCase):
             self.assertEqual(hand["t_weight"], 10.0)
             self.assertEqual(hand["r_weight"], 0.2)
             self.assertEqual(mapping[f"{side}ForeArm"]["r_weight"], 0.0)
+            self.assertEqual(mapping[f"{side}Leg"]["r_weight"], 0.0)
+            self.assertEqual(mapping[f"{side}Shin"]["r_weight"], 0.0)
             self.assertEqual(mapping[f"{side}Foot"]["r_weight"], 2.0)
 
     def test_feet_use_geometry_scale_and_vanilla_stabilizer(self):

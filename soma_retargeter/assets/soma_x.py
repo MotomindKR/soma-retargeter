@@ -22,6 +22,7 @@ REFERENCE_SOMA_STATURE_METERS = 1.7668
 _CANONICAL_SOMA_POSE = (
     Path(__file__).resolve().parents[1] / "configs" / "soma" / "soma_zero_frame0.bvh"
 )
+_SOMA_X_TO_Z_UP = Rotation.from_euler("x", 90.0, degrees=True).as_matrix()
 
 
 @dataclass(frozen=True)
@@ -223,12 +224,17 @@ def _global_matrices_to_local_transforms(
     return local_transforms
 
 
-def _apply_global_frame_corrections(
+def _align_soma_x_global_frames(
     global_matrices: np.ndarray,
     source_bind_rotations: np.ndarray,
     canonical_bind_rotations: np.ndarray,
 ) -> np.ndarray:
-    """Align joint bases while preserving every world-space joint position."""
+    """Align Y-up SOMA-X bind axes with canonical Z-up SOMA joint axes.
+
+    AMASS pose transforms already carry the motion's Z-up world orientation, so
+    only the SOMA-X bind reference is changed into the canonical basis. Joint
+    positions are deliberately left untouched.
+    """
 
     global_matrices = np.asarray(global_matrices)
     source_bind_rotations = np.asarray(source_bind_rotations)
@@ -251,8 +257,10 @@ def _apply_global_frame_corrections(
             f"{expected_rotation_shape}; received {canonical_bind_rotations.shape}"
         )
 
+    source_bind_rotations_z_up = _SOMA_X_TO_Z_UP[None] @ source_bind_rotations
     corrections = (
-        np.swapaxes(source_bind_rotations, -1, -2) @ canonical_bind_rotations
+        np.swapaxes(source_bind_rotations_z_up, -1, -2)
+        @ canonical_bind_rotations
     )
     aligned = np.array(global_matrices, copy=True)
     aligned[:, :, :3, :3] = global_matrices[:, :, :3, :3] @ corrections[None]
@@ -271,7 +279,7 @@ def _canonical_soma_global_rotations(joint_names: list[str]) -> np.ndarray:
 
     local = Rotation.from_quat(animation.local_transforms[0, :, 3:7])
     global_rotations: list[Rotation] = []
-    source_to_z_up = Rotation.from_euler("x", 90.0, degrees=True)
+    source_to_z_up = Rotation.from_matrix(_SOMA_X_TO_Z_UP)
     for joint_index, parent_index in enumerate(skeleton.parent_indices):
         if parent_index == -1:
             global_rotations.append(source_to_z_up * local[joint_index])
@@ -435,7 +443,7 @@ class SOMAXAMASSConverter:
         global_matrices = np.concatenate(transform_chunks, axis=0)
         joint_names = list(rig.joint_names)
         source_bind_matrices = rig.bind_transforms_world[0].detach().cpu().numpy()
-        global_matrices = _apply_global_frame_corrections(
+        global_matrices = _align_soma_x_global_frames(
             global_matrices,
             source_bind_matrices[:, :3, :3],
             _canonical_soma_global_rotations(joint_names),

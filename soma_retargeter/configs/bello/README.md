@@ -17,15 +17,18 @@ height using a ten-clip support-height sweep; the selected value places the
 median low-stance sole height at the ground plane without a motion-grounding
 pass. The single-stage task weights start from the upstream G1 pattern and were
 ablated on all ten bundled SOMA BVHs (6,408 source frames).
+The pelvis orientation anchors the body frame, while thigh and shin tasks are
+position-led to avoid equivalent but mechanically flipped leg solutions. Foot
+orientation remains active to preserve sole attitude.
 The selected arm map uses weak upper-arm and hand orientation tasks, while
 forearm orientation is zero-weighted. Bello's elbow frame cannot reproduce the
 full SOMA forearm frame; asking the whole-body solver to match it caused wrong
 IK branches and severe upstream twist.
 
-Against the initial single-stage baseline on the full suite, the selected map
-reduced colliding frames from 36.7% to 5.4%, near-limit samples from 32.6% to
-6.3%, worst foot-position p95 from 0.342 m to 0.069 m, and worst-motion joint
-jitter RMS from 3.28 to 1.75 degrees. These are comparative kinematic metrics,
+On the ten bundled BVHs, the final lower-body weights reduced the hip-limit
+frame rate on five clips and tied the other five. They also removed persistent
+hip-limit saturation from the three AMASS validation clips (ACCAD run, KIT
+squat, and Transitions punch-boxing). These are comparative kinematic checks,
 not claims of dynamic feasibility.
 
 Reproduce the bounded tuning grid with:

@@ -188,10 +188,10 @@ AMASS support uses the official `py-soma-x==0.2.1` topology and pose inversion
 pipeline to produce the same 78-joint SOMA representation consumed by the
 Newton retargeter. The adapter aligns SOMA-X's absolute joint frames to the
 canonical SOMA/BVH frames while preserving its native Z-up positions. AMASS
-starts directly from its first frame because the BVH zero-pose warm-start uses
-a different joint-frame convention. Enter `nix develop .#amass` or run
-`uv sync --extra amass`, then point the converter at the separately licensed
-SMPL-X body models:
+starts directly from its first frame because blending from the BVH zero pose
+can steer the solver into a different limb branch. Enter `nix develop .#amass`
+or run `uv sync --extra amass`, then point the converter at the separately
+licensed SMPL-X body models:
 
 ```bash
 export BELLO_MJCF_PATH="$HOME/bello_mujoco/deps/GMR/assets/bello/mjcf/bello_full_body_viewer.xml"

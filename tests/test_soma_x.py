@@ -8,7 +8,8 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from soma_retargeter.assets.soma_x import (
-    _apply_global_frame_corrections,
+    _SOMA_X_TO_Z_UP,
+    _align_soma_x_global_frames,
     _load_resampled_motion,
     load_amass_metadata,
 )
@@ -38,7 +39,7 @@ def test_joint_frame_alignment_preserves_world_positions() -> None:
         ]
     )
 
-    aligned = _apply_global_frame_corrections(
+    aligned = _align_soma_x_global_frames(
         global_matrices, source_bind, canonical_bind
     )
 
@@ -47,7 +48,7 @@ def test_joint_frame_alignment_preserves_world_positions() -> None:
     )
     expected = (
         global_matrices[:, :, :3, :3]
-        @ np.swapaxes(source_bind, -1, -2)[None]
+        @ np.swapaxes(_SOMA_X_TO_Z_UP[None] @ source_bind, -1, -2)[None]
         @ canonical_bind[None]
     )
     np.testing.assert_allclose(aligned[:, :, :3, :3], expected, atol=1.0e-12)
