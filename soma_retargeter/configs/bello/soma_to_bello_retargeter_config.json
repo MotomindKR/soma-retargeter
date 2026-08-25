@@ -7,7 +7,7 @@
   "model_height": 1.66,
   "ik_iterations": 24,
   "joint_limit_weight": 10.0,
-  "smooth_joint_filter_weight": 10.0,
+  "smooth_joint_filter_weight": 15.0,
   "enable_post_processing": true,
   "smooth_joint_filter_objective_body_masks": {
     "l_shoulder_pitch_link": 0.1,

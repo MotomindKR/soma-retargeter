@@ -28,13 +28,14 @@ forearm orientation is zero-weighted. Bello's elbow frame cannot reproduce the
 full SOMA forearm frame; asking the whole-body solver to match it caused wrong
 IK branches and severe upstream twist.
 
-Against the previous checked-in map on all 6,408 bundled BVH frames, the final
-map reduced self-collision frames from 4.57% to 3.25%, maximum penetration from
-48.6 mm to 33.0 mm, near-limit samples from 4.59% to 4.20%, worst hand position
-p95 from 455 mm to 374 mm, and worst jitter RMS from 1.84 to 1.61 degrees. The
-worst foot-position p95 increased from 54 mm to 72 mm on the extreme body
-stretch clip, an accepted tradeoff for the branch, collision, and smoothness
-gains.
+Against the initial vanilla Bello map on all 6,408 bundled BVH frames, the final
+map reduced self-collision frames from 4.57% to 2.43%, maximum penetration from
+48.6 mm to 20.0 mm, near-limit samples from 4.59% to 3.98%, worst hand position
+p95 from 455 mm to 379 mm, worst hand orientation p95 from 63.1 to 60.4 degrees,
+worst jitter RMS from 1.84 to 1.65 degrees, and velocity p99 from 810 to 705
+degrees/second. The worst foot-position p95 increased from 54 mm to 70 mm on
+the extreme body stretch clip, an accepted tradeoff for the branch, collision,
+and smoothness gains.
 
 Five four-second AMASS checks (run, squat, punch-boxing, crawl, and roundhouse)
 reduced mean self-collision frames from 50.0% to 36.3%, mean near-limit samples

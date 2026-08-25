@@ -76,7 +76,7 @@ class BelloConfigTests(unittest.TestCase):
         )
         self.assertEqual(config["ik_iterations"], 24)
         self.assertEqual(config["joint_limit_weight"], 10.0)
-        self.assertEqual(config["smooth_joint_filter_weight"], 10.0)
+        self.assertEqual(config["smooth_joint_filter_weight"], 15.0)
         self.assertEqual(
             config["smooth_joint_filter_objective_body_masks"]["l_upper_arm_link"],
             0.3,
