@@ -37,11 +37,18 @@ degrees/second. The worst foot-position p95 increased from 54 mm to 70 mm on
 the extreme body stretch clip, an accepted tradeoff for the branch, collision,
 and smoothness gains.
 
-Five four-second AMASS checks (run, squat, punch-boxing, crawl, and roundhouse)
-reduced mean self-collision frames from 50.0% to 36.3%, mean near-limit samples
-from 18.3% to 14.1%, and worst joint-acceleration p99 by 76%. The ACCAD run's
-worst hand-position p95 fell from 258 mm to 13 mm. These are comparative
-kinematic checks, not claims of dynamic feasibility.
+A larger AMASS robustness sweep covered 40 active motion windows from 20 source
+collections and 32 single-stage configurations (116,480 solved frames). It
+included locomotion, jumps and kicks, upper-body actions, level changes,
+turns, dance, and unlabeled recordings. The checked-in map was the only
+configuration with no catastrophic per-clip regression. The best aggregate
+alternative, lowering foot translation weight from 30 to 29.5, improved the
+weighted score by 2.6% and reduced mean velocity p99 from 776 to 694
+degrees/second, but selected bad branches for a SOMA dance and a Transitions
+crouch-walk. Raising solver iterations from 24 to 26 improved the aggregate
+score by 0.5% but also broke the dance. Both were rejected in favor of the
+zero-regression configuration. These are comparative kinematic checks, not
+claims of dynamic feasibility.
 
 Reproduce the bounded tuning grid with:
 
