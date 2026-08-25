@@ -31,7 +31,7 @@ class BelloConfigTests(unittest.TestCase):
         self.assertNotIn("offline_solver", config)
         self.assertNotIn("ground_clearance", config)
         mapping = config["ik_map"]
-        self.assertEqual(mapping["Hips"]["r_weight"], 10.0)
+        self.assertEqual(mapping["Hips"]["r_weight"], 7.5)
         for side in ("Left", "Right"):
             hand = mapping[f"{side}Hand"]
             prefix = "l" if side == "Left" else "r"
@@ -76,7 +76,7 @@ class BelloConfigTests(unittest.TestCase):
         )
         self.assertEqual(config["ik_iterations"], 24)
         self.assertEqual(config["joint_limit_weight"], 10.0)
-        self.assertEqual(config["smooth_joint_filter_weight"], 5.5)
+        self.assertEqual(config["smooth_joint_filter_weight"], 10.0)
         self.assertEqual(
             config["smooth_joint_filter_objective_body_masks"]["l_upper_arm_link"],
             0.3,

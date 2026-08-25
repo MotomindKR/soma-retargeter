@@ -19,17 +19,28 @@ pass. The single-stage task weights start from the upstream G1 pattern and were
 ablated on all ten bundled SOMA BVHs (6,408 source frames).
 The pelvis orientation anchors the body frame, while thigh and shin tasks are
 position-led to avoid equivalent but mechanically flipped leg solutions. Foot
-orientation remains active to preserve sole attitude.
+orientation remains active to preserve sole attitude. The pelvis orientation
+weight is deliberately below the translation weight: a stronger orientation
+anchor selected poor whole-body branches on several AMASS clips. Increasing
+the foot orientation weight beyond its selected value caused the same failure.
 The selected arm map uses weak upper-arm and hand orientation tasks, while
 forearm orientation is zero-weighted. Bello's elbow frame cannot reproduce the
 full SOMA forearm frame; asking the whole-body solver to match it caused wrong
 IK branches and severe upstream twist.
 
-On the ten bundled BVHs, the final lower-body weights reduced the hip-limit
-frame rate on five clips and tied the other five. They also removed persistent
-hip-limit saturation from the three AMASS validation clips (ACCAD run, KIT
-squat, and Transitions punch-boxing). These are comparative kinematic checks,
-not claims of dynamic feasibility.
+Against the previous checked-in map on all 6,408 bundled BVH frames, the final
+map reduced self-collision frames from 4.57% to 3.25%, maximum penetration from
+48.6 mm to 33.0 mm, near-limit samples from 4.59% to 4.20%, worst hand position
+p95 from 455 mm to 374 mm, and worst jitter RMS from 1.84 to 1.61 degrees. The
+worst foot-position p95 increased from 54 mm to 72 mm on the extreme body
+stretch clip, an accepted tradeoff for the branch, collision, and smoothness
+gains.
+
+Five four-second AMASS checks (run, squat, punch-boxing, crawl, and roundhouse)
+reduced mean self-collision frames from 50.0% to 36.3%, mean near-limit samples
+from 18.3% to 14.1%, and worst joint-acceleration p99 by 76%. The ACCAD run's
+worst hand-position p95 fell from 258 mm to 13 mm. These are comparative
+kinematic checks, not claims of dynamic feasibility.
 
 Reproduce the bounded tuning grid with:
 
